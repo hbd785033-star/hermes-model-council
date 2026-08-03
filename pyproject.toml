@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-model-council"
+version = "0.1.0"
+description = "Task-aware model routing, Hermes MoA presets, and anonymous model councils"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Hermes Model Council contributors"}]
+dependencies = []
+
+[project.scripts]
+model-council = "model_council.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["model_council*"]
