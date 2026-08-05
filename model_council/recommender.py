@@ -160,19 +160,29 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
             model for model in _rank(balanced_usable, profile, "advisor") if model != primary
         ]
     reference = references[0] if references else primary
-    balanced_risks = ["增加一次参考模型调用", *execution_risks]
+    balanced_advisors: list[Participant] = []
+    seen_families: set[str] = set()
+    for ref in references:
+        if ref.family not in seen_families:
+            balanced_advisors.append(
+                Participant(f"advisor-{len(balanced_advisors)+1}", ref, _effort(profile))
+            )
+            seen_families.add(ref.family)
+    if not balanced_advisors:
+        balanced_advisors = [Participant("advisor", primary, _effort(profile))]
+    balanced_participants = tuple(
+        [*balanced_advisors, Participant("aggregator", primary, _effort(profile, premium=True))]
+    )
+    balanced_risks = ["增加参考模型调用", *execution_risks]
     if reference.family == primary.family:
         balanced_risks.append("当前没有第二个可用模型家族，独立性有限")
     balanced = Plan(
         id="balanced",
         label="均衡/MoA",
         mode="moa",
-        participants=(
-            Participant("advisor", reference, _effort(profile)),
-            Participant("aggregator", primary, _effort(profile, premium=True)),
-        ),
-        estimated_calls=2,
-        max_calls=3,
+        participants=balanced_participants,
+        estimated_calls=len(balanced_participants),
+        max_calls=max(3, len(balanced_participants) + 1),
         strengths=("独立 Advisor 与 Aggregator", "模型调用复用 Hermes Provider 配置"),
         risks=tuple(balanced_risks),
     )
