@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -15,6 +17,39 @@ from .hermes_invoker import _redact
 from .inventory import ModelSpec
 
 _GLOBAL_PROBE_LOCK = threading.Lock()
+
+
+@contextmanager
+def _exclusive_lock(path: Path, *, timeout: float = 5.0):
+    """Acquire a portable inter-process lock using atomic file creation."""
+    deadline = time.monotonic() + max(0.1, timeout)
+    descriptor: int | None = None
+    while descriptor is None:
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                stale = time.time() - path.stat().st_mtime > 30
+            except OSError:
+                stale = False
+            if stale:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Timed out waiting for health cache lock: {path}")
+            time.sleep(0.01)
+    try:
+        os.write(descriptor, str(os.getpid()).encode("ascii"))
+        yield
+    finally:
+        os.close(descriptor)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 class HealthCache:
@@ -56,33 +91,47 @@ class HealthCache:
     def store(self, health: dict[str, bool], *, now: float | None = None) -> None:
         checked_at = time.time() if now is None else float(now)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            existing_payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            existing_payload = {}
-        existing_entries = (
-            existing_payload.get("models")
-            if isinstance(existing_payload, dict)
-            else {}
-        )
-        entries = dict(existing_entries) if isinstance(existing_entries, dict) else {}
-        entries.update(
-            {
-                key: {"healthy": value, "checked_at": checked_at}
-                for key, value in health.items()
-                if isinstance(value, bool)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        with _exclusive_lock(lock_path):
+            try:
+                existing_payload = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                existing_payload = {}
+            existing_entries = (
+                existing_payload.get("models")
+                if isinstance(existing_payload, dict)
+                else {}
+            )
+            entries = dict(existing_entries) if isinstance(existing_entries, dict) else {}
+            entries.update(
+                {
+                    key: {"healthy": value, "checked_at": checked_at}
+                    for key, value in health.items()
+                    if isinstance(value, bool)
+                }
+            )
+            payload = {
+                "version": 1,
+                "models": {key: entries[key] for key in sorted(entries)},
             }
-        )
-        payload = {
-            "version": 1,
-            "models": {key: entries[key] for key in sorted(entries)},
-        }
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=True, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, self.path)
+            temporary_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=self.path.parent,
+                    prefix=f"{self.path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temporary:
+                    temporary.write(json.dumps(payload, ensure_ascii=True, indent=2) + "\n")
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                    temporary_path = Path(temporary.name)
+                os.replace(temporary_path, self.path)
+            finally:
+                if temporary_path is not None and temporary_path.exists():
+                    temporary_path.unlink()
 
 
 @dataclass(frozen=True)

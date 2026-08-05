@@ -157,6 +157,35 @@ class ProbeModelsTests(unittest.TestCase):
                 {second.key: True},
             )
 
+    def test_concurrent_cache_writes_preserve_all_entries(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cache.json"
+            models = [
+                ModelSpec("provider", f"model-{index}", "family")
+                for index in range(20)
+            ]
+            start = threading.Barrier(len(models))
+            errors = []
+
+            def write(model):
+                try:
+                    start.wait(timeout=2)
+                    HealthCache(path).store({model.key: True}, now=1000)
+                except Exception as exc:  # noqa: BLE001 - capture thread failures
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=write, args=(model,)) for model in models]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=3)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                HealthCache(path).load(models, now=1001),
+                {model.key: True for model in models},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
