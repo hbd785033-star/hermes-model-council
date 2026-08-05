@@ -114,24 +114,21 @@ class HealthCache:
                 "version": 1,
                 "models": {key: entries[key] for key in sorted(entries)},
             }
-            temporary_path: Path | None = None
+            fd, tmp_name = tempfile.mkstemp(
+                suffix=".tmp", prefix=f"{self.path.name}.", dir=self.path.parent
+            )
+            temporary_path = Path(tmp_name)
             try:
-                with tempfile.NamedTemporaryFile(
-                    mode="w",
-                    encoding="utf-8",
-                    dir=self.path.parent,
-                    prefix=f"{self.path.name}.",
-                    suffix=".tmp",
-                    delete=False,
-                ) as temporary:
+                with os.fdopen(fd, "w", encoding="utf-8") as temporary:
                     temporary.write(json.dumps(payload, ensure_ascii=True, indent=2) + "\n")
                     temporary.flush()
                     os.fsync(temporary.fileno())
-                    temporary_path = Path(temporary.name)
                 os.replace(temporary_path, self.path)
             finally:
-                if temporary_path is not None and temporary_path.exists():
+                try:
                     temporary_path.unlink()
+                except OSError:
+                    pass
 
 
 @dataclass(frozen=True)

@@ -489,7 +489,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"Installed native Hermes MoA presets. Backup: {backup}")
             print(f"Default preset: {payload['default_preset']}")
-            print("Presets: " + ", ".join(preset_names))
+            print("Presets: " + ", ".join(str(name) for name in preset_names))
         return 0
 
     return 2

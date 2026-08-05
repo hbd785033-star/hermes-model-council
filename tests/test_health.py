@@ -1,8 +1,9 @@
+import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
-from tempfile import TemporaryDirectory
+import shutil
 
 from model_council.health import HealthCache, _safe_error, probe_models
 from model_council.inventory import ModelSpec
@@ -122,69 +123,74 @@ class ProbeModelsTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(max_active, 1)
 
+    def _mktempdir(self):
+        path = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(path), ignore_errors=True)
+        return path
+
     def test_health_cache_reuses_fresh_results_without_storing_diagnostics(self):
         model = ModelSpec("provider", "model", "family")
-        with TemporaryDirectory() as directory:
-            cache = HealthCache(
-                Path(directory) / "cache.json",
-                ttl_seconds=900,
-                failure_ttl_seconds=120,
-            )
-            failed = ModelSpec("provider", "failed", "family")
-            cache.store({model.key: True, failed.key: False}, now=1000)
-            self.assertEqual(
-                cache.load([model, failed], now=1001),
-                {model.key: True, failed.key: False},
-            )
-            self.assertEqual(cache.load([model, failed], now=1121), {model.key: True})
-            self.assertEqual(cache.load([model, failed], now=2000), {})
-            self.assertNotIn("diagnostic", cache.path.read_text(encoding="utf-8"))
+        directory = self._mktempdir()
+        cache = HealthCache(
+            Path(directory) / "cache.json",
+            ttl_seconds=900,
+            failure_ttl_seconds=120,
+        )
+        failed = ModelSpec("provider", "failed", "family")
+        cache.store({model.key: True, failed.key: False}, now=1000)
+        self.assertEqual(
+            cache.load([model, failed], now=1001),
+            {model.key: True, failed.key: False},
+        )
+        self.assertEqual(cache.load([model, failed], now=1121), {model.key: True})
+        self.assertEqual(cache.load([model, failed], now=2000), {})
+        self.assertNotIn("diagnostic", cache.path.read_text(encoding="utf-8"))
 
     def test_cache_update_preserves_existing_entry_timestamp(self):
         first = ModelSpec("provider", "first", "family")
         second = ModelSpec("provider", "second", "family")
-        with TemporaryDirectory() as directory:
-            cache = HealthCache(Path(directory) / "cache.json", ttl_seconds=900)
-            cache.store({first.key: True}, now=1000)
-            cache.store({second.key: True}, now=1100)
+        directory = self._mktempdir()
+        cache = HealthCache(Path(directory) / "cache.json", ttl_seconds=900)
+        cache.store({first.key: True}, now=1000)
+        cache.store({second.key: True}, now=1100)
 
-            self.assertEqual(
-                cache.load([first, second], now=1101),
-                {first.key: True, second.key: True},
-            )
-            self.assertEqual(
-                cache.load([first, second], now=1901),
-                {second.key: True},
-            )
+        self.assertEqual(
+            cache.load([first, second], now=1101),
+            {first.key: True, second.key: True},
+        )
+        self.assertEqual(
+            cache.load([first, second], now=1901),
+            {second.key: True},
+        )
 
     def test_concurrent_cache_writes_preserve_all_entries(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "cache.json"
-            models = [
-                ModelSpec("provider", f"model-{index}", "family")
-                for index in range(20)
-            ]
-            start = threading.Barrier(len(models))
-            errors = []
+        directory = self._mktempdir()
+        path = Path(directory) / "cache.json"
+        models = [
+            ModelSpec("provider", f"model-{index}", "family")
+            for index in range(20)
+        ]
+        start = threading.Barrier(len(models))
+        errors = []
 
-            def write(model):
-                try:
-                    start.wait(timeout=2)
-                    HealthCache(path).store({model.key: True}, now=1000)
-                except Exception as exc:  # noqa: BLE001 - capture thread failures
-                    errors.append(exc)
+        def write(model):
+            try:
+                start.wait(timeout=2)
+                HealthCache(path).store({model.key: True}, now=1000)
+            except Exception as exc:  # noqa: BLE001 - capture thread failures
+                errors.append(exc)
 
-            threads = [threading.Thread(target=write, args=(model,)) for model in models]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=3)
+        threads = [threading.Thread(target=write, args=(model,)) for model in models]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
 
-            self.assertEqual(errors, [])
-            self.assertEqual(
-                HealthCache(path).load(models, now=1001),
-                {model.key: True for model in models},
-            )
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            HealthCache(path).load(models, now=1001),
+            {model.key: True for model in models},
+        )
 
 
 if __name__ == "__main__":

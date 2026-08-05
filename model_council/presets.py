@@ -69,10 +69,11 @@ def build_native_moa_config(
     active = str(raw.get("active_preset") or "").strip()
     if active not in presets:
         active = ""
-    return {
+    result: dict[str, Any] = {
         **raw,
         "default_preset": BALANCED_PRESET,
         "active_preset": active,
         "presets": presets,
         "privacy_filter": "full",
     }
+    return result
