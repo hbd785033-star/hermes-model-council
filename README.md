@@ -10,8 +10,8 @@
   - `fast`：单模型基线，1 次调用。
   - `balanced`：Advisor → Aggregator，通常 2 次调用。
   - `quality`：并行独立回答 → 匿名互评 → Chairman，默认最多 9 次调用。
-- 实时健康探测；live probe 后只有实际通过的型号才会被推荐。
-- 调用预算、并发上限、超时、失败披露和 Provider 降级。
+- 实时健康探测；只有清理后的完整响应严格等于 `HEALTH_OK` 才视为健康，live probe 后只有实际通过的型号才会被推荐。
+- 调用预算、阶段提示预算、并发上限、超时、失败披露和 Provider 降级。
 - 生成 Hermes 原生 `model-council-balanced` / `model-council-quality` MoA Preset。
 - 默认不记录任务正文或模型输出；仅由 Hermes 自身管理其子会话。
 
@@ -19,7 +19,7 @@
 
 Model Council 不替代 Hermes Provider、OAuth、安全、工具和会话体系。所有模型调用仍通过 `hermes chat`，不会复制 API Key，也不在项目文件中保存凭据。
 
-自定义 Council 执行器的子调用默认禁用工具，用于独立推理和匿名评审。需要工具的任务应安装并使用 Hermes 原生 MoA Preset。
+自定义 Council 执行器的子调用默认禁用工具并隔离会话，用于独立推理和匿名评审。需要工具或当前会话上下文的任务应安装并使用 Hermes 原生 MoA Preset。
 
 ## 安装
 
@@ -67,7 +67,9 @@ python -m model_council inventory
 python -m model_council recommend '审查生产认证代码并给出修复方案' --probe
 ```
 
-`--probe` 会进行最小、无工具的 `HEALTH_OK` 调用。探测会产生少量模型调用。
+`--probe` 会进行最小、无工具的 `HEALTH_OK` 调用。成功结果默认缓存 15 分钟，失败结果只缓存 2 分钟，避免短任务重复承担 Hermes 子会话的固定上下文成本，同时不会长时间放大瞬时故障；使用 `--refresh-probe` 可强制重新探测。
+
+JSON 输出会分别报告 `probe_call_count`、`probe_cache_hit_count`、`execution_call_count` 和 `total_call_count`。旧字段 `call_count` 保留为执行阶段调用数。这些字段统计 Model Council 发起的 Hermes 子会话；Provider 内部对 429 等错误的 HTTP 重试不由 Hermes CLI 暴露，因此不计入。
 
 ### 3. 用户确认后执行
 
@@ -85,7 +87,7 @@ python -m model_council run '任务正文' --plan quality --yes
 python -m model_council install-presets --yes
 ```
 
-写配置前自动创建时间戳备份。安装后可以在 Hermes 中使用：
+写配置前自动创建时间戳备份，写入后执行 `hermes config check`；检查失败时自动恢复备份。安装后可以在 Hermes 中使用：
 
 ```text
 /moa:model-council-balanced
@@ -97,7 +99,7 @@ python -m model_council install-presets --yes
 - 不读取或输出 Token、API Key、OAuth 内容。
 - 子进程使用参数数组，`shell=False`，避免命令注入。
 - 错误信息进行常见凭据格式脱敏。
-- Council 评审隐藏 Provider 和模型型号，并随机化候选顺序。
+- Council 候选与 peer review 都会隐藏 Provider、模型型号及常见模型家族别名，并随机化候选顺序。
 - 同一敏感任务发送给多个云 Provider 前，必须由用户选择方案。
 - 已知失败的 Provider 不会静默换另一个未验证型号。
 
@@ -110,6 +112,8 @@ python -m unittest discover -s tests -v
 ## 当前限制
 
 - 成本展示目前以调用次数和模型档位为主；Hermes inventory 没有稳定返回价格时，不伪造美元估算。
-- 自定义 Council 通过命令行传递提示词，单次提示限制为 24,000 字符。
-- live probe 只在当前命令中生效，默认不持久化健康数据。
+- 自定义 Council 通过命令行传递提示词，单次提示限制为 24,000 字符；跨阶段材料会按预算裁剪并显式标记。
+- 自定义子调用的输出长度通过角色提示软约束（Advisor/Reviewer 800 词，Actor/Aggregator/Chairman 1,200 词）；Hermes CLI 暂无 Provider 级输出 Token 参数。原生 MoA Preset 使用硬性 `max_tokens=4096`，参考输出为 600/900 Token。
+- live probe 结果只持久化模型键、健康布尔值和检查时间，不保存任务、模型输出或错误详情；缓存文件位于被 Git 忽略的 `artifacts/health-cache.json`。
+- Hermes 子会话使用独立来源标签 `model-council`，可通过 `hermes insights --source model-council` 查看实际 Token 使用。
 - 模型能力评分是可解释规则，尚未使用历史反馈训练路由器。

@@ -26,11 +26,14 @@ class CouncilRunnerTests(unittest.TestCase):
         calls = []
 
         def invoke(model, prompt, role, effort):
-            calls.append((model, prompt, role, effort))
+            calls.append((model.key, prompt, role, effort))
             if role.startswith("advisor"):
-                return f"independent answer {role[-1]}"
+                self.assertIn("800 words", prompt)
+                return f"draft from {model.model} by {model.provider}"
             if role.startswith("reviewer"):
-                return "anonymous review"
+                self.assertIn("800 words", prompt)
+                return "review"
+            self.assertIn("1,200 words", prompt)
             return "FINAL VERDICT"
 
         result = CouncilRunner(invoke=invoke, max_workers=4).run(
@@ -65,6 +68,127 @@ class CouncilRunnerTests(unittest.TestCase):
         ):
             self.assertNotIn(identity, lowered)
         self.assertIn("[model identity hidden]", cleaned)
+
+    def test_peer_review_outputs_are_scrubbed_before_chairman(self):
+        models = [
+            ModelSpec("anthropic", "claude-opus-4-6", "anthropic"),
+            ModelSpec("openai-codex", "gpt-5.6-sol", "openai"),
+        ]
+        plan = Plan(
+            "quality",
+            "Quality",
+            "council",
+            (
+                Participant("advisor-1", models[0], "high"),
+                Participant("advisor-2", models[1], "high"),
+                Participant("chairman", models[1], "high"),
+            ),
+            5,
+            9,
+            (),
+            (),
+        )
+        chairman_prompts = []
+
+        def invoke(model, prompt, role, effort):
+            if role.startswith("advisor"):
+                return "anonymous candidate"
+            if role.startswith("reviewer"):
+                return "I am Claude from ANTHROPIC; GPT-5.6-SOL is weaker."
+            chairman_prompts.append(prompt)
+            return "final"
+
+        result = CouncilRunner(invoke=invoke, max_workers=1).run("task", plan, seed=1)
+
+        review_text = " ".join(result.reviews).lower()
+        chairman_text = " ".join(chairman_prompts).lower()
+        for identity in ("claude", "anthropic", "gpt-5.6-sol"):
+            self.assertNotIn(identity, review_text)
+            self.assertNotIn(identity, chairman_text)
+
+    def test_council_bounds_intermediate_outputs_to_prompt_limit(self):
+        models = [
+            ModelSpec("provider-a", "model-a", "family-a"),
+            ModelSpec("provider-b", "model-b", "family-b"),
+        ]
+        plan = Plan(
+            "quality",
+            "Quality",
+            "council",
+            (
+                Participant("advisor-1", models[0], "high"),
+                Participant("advisor-2", models[1], "high"),
+                Participant("chairman", models[0], "high"),
+            ),
+            5,
+            9,
+            (),
+            (),
+        )
+
+        def invoke(model, prompt, role, effort):
+            if len(prompt) > 24000:
+                raise ValueError("prompt exceeds safe command limit")
+            if role.startswith("advisor"):
+                return "A" * 16000
+            if role.startswith("reviewer"):
+                return "R" * 12000
+            return "FINAL"
+
+        result = CouncilRunner(invoke=invoke, max_workers=1).run("task", plan)
+
+        self.assertEqual(result.final, "FINAL")
+        self.assertEqual(result.failures, ())
+        self.assertEqual(result.call_count, 5)
+
+    def test_council_bounds_long_task_before_advisor_calls(self):
+        models = [
+            ModelSpec("provider-a", "model-a", "family-a"),
+            ModelSpec("provider-b", "model-b", "family-b"),
+        ]
+        plan = Plan(
+            "quality",
+            "Quality",
+            "council",
+            (
+                Participant("advisor-1", models[0], "high"),
+                Participant("advisor-2", models[1], "high"),
+                Participant("chairman", models[0], "high"),
+            ),
+            5,
+            9,
+            (),
+            (),
+        )
+
+        def invoke(model, prompt, role, effort):
+            if len(prompt) > 24000:
+                raise ValueError("prompt exceeds safe command limit")
+            if role.startswith("advisor"):
+                return "candidate"
+            if role.startswith("reviewer"):
+                return "review"
+            return "FINAL"
+
+        result = CouncilRunner(invoke=invoke, max_workers=1).run("T" * 23900, plan)
+
+        self.assertEqual(result.final, "FINAL")
+        self.assertEqual(result.failures, ())
+
+    def test_bounded_block_never_exceeds_requested_limit(self):
+        block = CouncilRunner._bounded_block(
+            [("One", "A" * 100), ("Two", "B" * 100), ("Three", "C" * 100)],
+            120,
+        )
+
+        self.assertLessEqual(len(block), 120)
+
+    def test_scrubs_short_provider_identity(self):
+        model = ModelSpec("xai", "grok-4", "xai")
+
+        cleaned = CouncilRunner._scrub_identities("Built by xAI", [model])
+
+        self.assertNotIn("xai", cleaned.lower())
 
     def test_moa_falls_back_to_advisor_when_aggregator_fails(self):
         advisor = ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=True)

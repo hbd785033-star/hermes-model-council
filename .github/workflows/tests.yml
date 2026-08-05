@@ -10,7 +10,12 @@ permissions:
 
 jobs:
   unittest:
-    runs-on: ubuntu-latest
+    name: Python 3.11 / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

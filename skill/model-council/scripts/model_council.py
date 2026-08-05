@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 project = Path(
     os.environ.get("MODEL_COUNCIL_HOME", r"D:\Projects\hermes-model-council")
@@ -17,6 +17,6 @@ if not (project / "model_council" / "cli.py").is_file():
     )
 sys.path.insert(0, str(project))
 
-from model_council.cli import main  # noqa: E402
+from model_council.cli import main
 
 raise SystemExit(main())

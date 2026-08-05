@@ -5,10 +5,9 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-from typing import Callable
+from collections.abc import Callable
 
 from .inventory import ModelSpec
-
 
 _SECRET_PATTERNS = (
     (
@@ -86,7 +85,7 @@ class HermesInvoker:
             "--ignore-rules",
             "--safe-mode",
             "--source",
-            "tool",
+            "model-council",
             "-q",
             text,
         ]

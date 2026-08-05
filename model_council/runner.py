@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 import random
 import re
-from typing import Callable
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
 from .inventory import ModelSpec
 from .recommender import Participant, Plan
 
-
 Invoker = Callable[[ModelSpec, str, str, str], str]
+
+_MAX_STAGE_TASK_CHARS = 6000
+_MAX_REFERENCE_BLOCK_CHARS = 14000
+_MAX_CHAIRMAN_ANSWER_CHARS = 9000
+_MAX_CHAIRMAN_REVIEW_CHARS = 7000
+_TRUNCATION_MARKER = "\n[content truncated for stage prompt budget]"
 
 
 @dataclass(frozen=True)
@@ -63,7 +68,8 @@ class CouncilRunner:
 
     def _run_single(self, task: str, plan: Plan) -> CouncilResult:
         actor = plan.chairman
-        final = self.invoke(actor.model, task, "actor", actor.reasoning_effort)
+        prompt = f"{task}\n\nReturn a concise final answer in at most 1,200 words."
+        final = self.invoke(actor.model, prompt, "actor", actor.reasoning_effort)
         return CouncilResult(plan.id, final, (), (), (), 1)
 
     def _parallel(
@@ -89,7 +95,7 @@ class CouncilRunner:
                     if not text:
                         raise RuntimeError("empty response")
                     completed[index] = (participant, text)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - model invocation boundary
                     failures.append(
                         f"{role_prefix}-{index + 1} ({participant.model.key}) failed: "
                         f"{type(exc).__name__}: {exc}"
@@ -97,22 +103,61 @@ class CouncilRunner:
         return [completed[index] for index in sorted(completed)], failures, len(participants)
 
     @staticmethod
-    def _advisor_prompt(task: str, role: str) -> str:
+    def _clip(text: str, max_chars: int) -> str:
+        value = str(text or "")
+        if max_chars <= 0:
+            return ""
+        if len(value) <= max_chars:
+            return value
+        if max_chars <= len(_TRUNCATION_MARKER):
+            return _TRUNCATION_MARKER[:max_chars]
+        keep = max_chars - len(_TRUNCATION_MARKER)
+        return value[:keep] + _TRUNCATION_MARKER
+
+    @classmethod
+    def _bounded_block(
+        cls, entries: list[tuple[str, str]], max_chars: int
+    ) -> str:
+        if not entries:
+            return ""
+        separators = 2 * (len(entries) - 1)
+        heading_chars = sum(len(f"{heading}:\n") for heading, _ in entries)
+        body_budget = max_chars - heading_chars - separators
+        if body_budget < 0:
+            headings = "\n\n".join(f"{heading}:\n" for heading, _ in entries)
+            return cls._clip(headings, max_chars)
+        per_entry, remainder = divmod(body_budget, len(entries))
+        blocks = []
+        for index, (heading, text) in enumerate(entries):
+            allowance = per_entry + (1 if index < remainder else 0)
+            blocks.append(f"{heading}:\n{cls._clip(text, allowance)}")
+        return "\n\n".join(blocks)
+
+    @classmethod
+    def _advisor_prompt(cls, task: str, role: str) -> str:
         return (
             "You are an independent member of a model council. "
             f"Your assigned lens is {role}. Analyze independently and do not imitate consensus.\n\n"
-            f"TASK:\n{task}\n\n"
-            "Return: position, strongest evidence, failure modes, and one actionable recommendation. "
-            "Do not mention your model or provider identity."
+            f"TASK:\n{cls._clip(task, _MAX_STAGE_TASK_CHARS)}\n\n"
+            "Return at most 800 words: position, strongest evidence, failure modes, and one "
+            "actionable recommendation. Do not mention your model or provider identity."
         )
 
     @staticmethod
     def _scrub_identities(text: str, models: list[ModelSpec]) -> str:
         cleaned = text
         terms: set[str] = set()
+        family_aliases = {
+            "anthropic": {"anthropic", "claude"},
+            "openai": {"openai", "chatgpt", "codex", "gpt"},
+            "google": {"google", "gemini"},
+            "deepseek": {"deepseek"},
+            "xai": {"xai", "grok"},
+        }
         for model in models:
             terms.update({model.model, model.provider, model.family})
-        for term in sorted((item for item in terms if len(item) >= 4), key=len, reverse=True):
+            terms.update(family_aliases.get(model.family.lower(), set()))
+        for term in sorted((item for item in terms if len(item) >= 3), key=len, reverse=True):
             cleaned = re.sub(
                 re.escape(term),
                 "[model identity hidden]",
@@ -130,18 +175,24 @@ class CouncilRunner:
         answers, failures, calls = self._parallel(advisors, prompts, "advisor")
         if not answers:
             raise RuntimeError("All MoA advisors failed")
-        references = "\n\n".join(
-            f"REFERENCE {index + 1}:\n{text}" for index, (_, text) in enumerate(answers)
+        references = self._bounded_block(
+            [
+                (f"REFERENCE {index + 1}", text)
+                for index, (_, text) in enumerate(answers)
+            ],
+            _MAX_REFERENCE_BLOCK_CHARS,
         )
         prompt = (
             f"Solve the task using the independent references below. Verify conflicts rather than "
-            f"blindly averaging them.\n\nTASK:\n{task}\n\n{references}"
+            f"blindly averaging them.\n\nTASK:\n"
+            f"{self._clip(task, _MAX_STAGE_TASK_CHARS)}\n\n{references}\n\n"
+            "Return a concise final answer in at most 1,200 words."
         )
         try:
             final = self.invoke(
                 aggregator.model, prompt, "aggregator", aggregator.reasoning_effort
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - model invocation boundary
             failures.append(
                 f"aggregator ({aggregator.model.key}) failed: "
                 f"{type(exc).__name__}: {exc}"
@@ -178,32 +229,42 @@ class CouncilRunner:
             )
             for index, (_, text) in enumerate(shuffled)
         )
-        answer_block = "\n\n".join(
-            f"Response {label}:\n{text}" for label, text in anonymous_answers
+        answer_block = self._bounded_block(
+            [(f"Response {label}", text) for label, text in anonymous_answers],
+            _MAX_REFERENCE_BLOCK_CHARS,
         )
         review_prompt = (
             "You are peer-reviewing anonymized council answers. Model identities are intentionally "
             "hidden. Judge only correctness, evidence, completeness, and actionable value.\n\n"
-            f"TASK:\n{task}\n\n{answer_block}\n\n"
-            "Return: strongest response, largest blind spot, key disagreement, and what all answers missed."
+            f"TASK:\n{self._clip(task, _MAX_STAGE_TASK_CHARS)}\n\n{answer_block}\n\n"
+            "Return at most 800 words: strongest response, largest blind spot, key disagreement, "
+            "and what all answers missed."
         )
         reviewers = advisors[: min(2, len(advisors))]
         reviews_raw, review_failures, review_calls = self._parallel(
             reviewers, [review_prompt] * len(reviewers), "reviewer"
         )
         failures.extend(review_failures)
-        reviews = tuple(text for _, text in reviews_raw)
-        review_block = "\n\n".join(
-            f"Peer Review {index + 1}:\n{text}" for index, text in enumerate(reviews)
+        reviews = tuple(
+            self._scrub_identities(text, known_models) for _, text in reviews_raw
+        )
+        chairman_answer_block = self._bounded_block(
+            [(f"Response {label}", text) for label, text in anonymous_answers],
+            _MAX_CHAIRMAN_ANSWER_CHARS,
+        )
+        review_block = self._bounded_block(
+            [(f"Peer Review {index + 1}", text) for index, text in enumerate(reviews)],
+            _MAX_CHAIRMAN_REVIEW_CHARS,
         ) or "No peer review succeeded; judge the anonymous answers directly."
         chairman_prompt = (
             "You are the chairman of a model council. Produce a decisive final answer without "
             "revealing hidden model identities. Preserve meaningful disagreement instead of forcing "
             "false consensus.\n\n"
-            f"TASK:\n{task}\n\nANONYMOUS ANSWERS:\n{answer_block}\n\n"
+            f"TASK:\n{self._clip(task, _MAX_STAGE_TASK_CHARS)}\n\n"
+            f"ANONYMOUS ANSWERS:\n{chairman_answer_block}\n\n"
             f"PEER REVIEWS:\n{review_block}\n\n"
-            "Structure: Council agreement; important disagreements; blind spots; final recommendation; "
-            "first concrete action."
+            "Structure in at most 1,200 words: Council agreement; important disagreements; "
+            "blind spots; final recommendation; first concrete action."
         )
         try:
             final = self.invoke(
@@ -212,7 +273,7 @@ class CouncilRunner:
                 "chairman",
                 chairman.reasoning_effort,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - model invocation boundary
             failures.append(
                 f"chairman ({chairman.model.key}) failed: "
                 f"{type(exc).__name__}: {exc}"

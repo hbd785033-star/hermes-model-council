@@ -59,7 +59,7 @@ def analyze_task(task: str) -> TaskProfile:
         "research": _matches(text, _RESEARCH_TERMS),
         "decision": _matches(text, _DECISION_TERMS),
     }
-    kind = max(counts, key=counts.get) if any(counts.values()) else "general"
+    kind = max(counts, key=lambda name: counts[name]) if any(counts.values()) else "general"
     risk_hits = _matches(text, _HIGH_RISK_TERMS)
     complex_hits = _matches(text, _COMPLEX_TERMS)
     complexity = min(5, 1 + min(2, len(text) // 180) + min(2, complex_hits * 2))

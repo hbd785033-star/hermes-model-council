@@ -3,22 +3,26 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, replace
-from datetime import datetime
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
+from dataclasses import asdict, replace
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .analysis import TaskProfile, analyze_task
-from .health import ProbeResult, probe_models
+from .health import HealthCache, ProbeResult, probe_models
 from .hermes_invoker import HermesInvoker
 from .inventory import ModelSpec, discover_models
 from .presets import build_native_moa_config
 from .recommender import Plan, recommend_plans
 from .runner import CouncilResult, CouncilRunner
+
+_HEALTH_CACHE_PATH = Path(__file__).resolve().parents[1] / "artifacts" / "health-cache.json"
+_HEALTH_CACHE_TTL_SECONDS = 900
 
 
 def model_to_dict(model: ModelSpec) -> dict[str, Any]:
@@ -103,26 +107,57 @@ def prepare_recommendation(
     *,
     live_probe: bool,
     timeout: int,
-) -> tuple[TaskProfile, list[ModelSpec], list[Plan], dict[str, str]]:
+    refresh_probe: bool = False,
+) -> tuple[TaskProfile, list[ModelSpec], list[Plan], dict[str, str], int, int]:
     profile = analyze_task(task)
     models = discover_models()
     plans = recommend_plans(profile, models)
     diagnostics: dict[str, str] = {}
+    probe_call_count = 0
+    probe_cache_hit_count = 0
     if live_probe:
         invoker = HermesInvoker(timeout=timeout)
-        checked: set[str] = set()
+        cache = HealthCache(_HEALTH_CACHE_PATH, _HEALTH_CACHE_TTL_SECONDS)
+        cached = {} if refresh_probe else cache.load(models)
+        probe_cache_hit_count = len(cached)
+        if cached:
+            cached_models = tuple(
+                replace(model, healthy=cached[model.key])
+                for model in models
+                if model.key in cached
+            )
+            cached_result = ProbeResult(
+                cached_models,
+                {
+                    model.key: "cached: ok" if model.healthy else "cached: unavailable"
+                    for model in cached_models
+                },
+            )
+            diagnostics.update(cached_result.diagnostics)
+            models = _merge_health(models, cached_result)
+            plans = recommend_plans(profile, models)
+        checked: set[str] = set(cached)
         for _ in range(2):
             candidates = probe_candidates(plans, exclude_keys=checked)
             if not candidates:
                 break
             result = probe_models(candidates, invoke=invoker, max_workers=3)
+            probe_call_count += len(result.models)
             checked.update(model.key for model in result.models)
             diagnostics.update(result.diagnostics)
+            cache.store({model.key: bool(model.healthy) for model in result.models})
             models = _merge_health(models, result)
             plans = recommend_plans(profile, models)
         models = _only_verified(models)
         plans = recommend_plans(profile, models)
-    return profile, models, plans, diagnostics
+    return (
+        profile,
+        models,
+        plans,
+        diagnostics,
+        probe_call_count,
+        probe_cache_hit_count,
+    )
 
 
 def _print_inventory(models: list[ModelSpec], as_json: bool) -> None:
@@ -145,12 +180,16 @@ def _recommendation_payload(
     models: list[ModelSpec],
     plans: list[Plan],
     diagnostics: dict[str, str],
+    probe_call_count: int = 0,
+    probe_cache_hit_count: int = 0,
 ) -> dict[str, Any]:
     return {
         "task_profile": asdict(profile),
         "available_models": [model_to_dict(model) for model in models if model.healthy is not False],
         "plans": [plan_to_dict(plan) for plan in plans],
         "health_diagnostics": diagnostics,
+        "probe_call_count": probe_call_count,
+        "probe_cache_hit_count": probe_cache_hit_count,
     }
 
 
@@ -159,12 +198,21 @@ def _print_recommendation(
     models: list[ModelSpec],
     plans: list[Plan],
     diagnostics: dict[str, str],
+    probe_call_count: int,
+    probe_cache_hit_count: int,
     as_json: bool,
 ) -> None:
     if as_json:
         print(
             json.dumps(
-                _recommendation_payload(profile, models, plans, diagnostics),
+                _recommendation_payload(
+                    profile,
+                    models,
+                    plans,
+                    diagnostics,
+                    probe_call_count,
+                    probe_cache_hit_count,
+                ),
                 ensure_ascii=False,
                 indent=2,
             )
@@ -178,6 +226,7 @@ def _print_recommendation(
         print("\nHealth probes:")
         for key, status in diagnostics.items():
             print(f"  - {key}: {status}")
+        print(f"  actual calls: {probe_call_count}; cache hits: {probe_cache_hit_count}")
     for plan in plans:
         print(f"\n[{plan.id}] {plan.label} — mode={plan.mode}, calls≈{plan.estimated_calls}")
         for participant in plan.participants:
@@ -189,7 +238,13 @@ def _print_recommendation(
         print(f"  risks: {', '.join(plan.risks)}")
 
 
-def _result_payload(result: CouncilResult) -> dict[str, Any]:
+def _result_payload(
+    result: CouncilResult,
+    *,
+    probe_call_count: int = 0,
+    probe_cache_hit_count: int = 0,
+) -> dict[str, Any]:
+    total = probe_call_count + result.call_count
     return {
         "plan": result.plan_id,
         "final": result.final,
@@ -199,10 +254,14 @@ def _result_payload(result: CouncilResult) -> dict[str, Any]:
         "reviews": list(result.reviews),
         "failures": list(result.failures),
         "call_count": result.call_count,
+        "probe_call_count": probe_call_count,
+        "probe_cache_hit_count": probe_cache_hit_count,
+        "execution_call_count": result.call_count,
+        "total_call_count": total,
     }
 
 
-def _backup_hermes_config(executable: str = "hermes") -> Path:
+def _backup_hermes_config(executable: str = "hermes") -> tuple[Path, Path]:
     result = subprocess.run(
         [executable, "config", "path"],
         capture_output=True,
@@ -211,16 +270,58 @@ def _backup_hermes_config(executable: str = "hermes") -> Path:
         errors="replace",
         timeout=30,
         shell=False,
+        check=False,
     )
     if result.returncode != 0 or not result.stdout.strip():
         raise RuntimeError("Could not resolve Hermes config path for backup")
     source = Path(result.stdout.strip().splitlines()[-1])
     if not source.is_file():
         raise RuntimeError(f"Hermes config file does not exist: {source}")
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%SZ")
     backup = source.with_name(f"{source.name}.model-council-backup-{stamp}")
     shutil.copy2(source, backup)
-    return backup
+    return source, backup
+
+
+def _check_hermes_config(executable: str = "hermes") -> None:
+    result = subprocess.run(
+        [executable, "config", "check"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        shell=False,
+        check=False,
+    )
+    if result.returncode != 0:
+        diagnostic = (result.stderr or result.stdout or "unknown error").strip()
+        raise RuntimeError(f"Hermes config check failed: {diagnostic[:1000]}")
+
+
+def _save_config_with_rollback(
+    config: dict[str, Any],
+    *,
+    save_config: Callable[[dict[str, Any]], Any],
+    source: Path,
+    backup: Path,
+    check_config: Callable[[], None] = _check_hermes_config,
+) -> None:
+    try:
+        save_config(config)
+        check_config()
+    except Exception as exc:
+        shutil.copy2(backup, source)
+        try:
+            check_config()
+        except Exception as restore_exc:  # noqa: BLE001 - validation callback boundary
+            raise RuntimeError(
+                "Generated Hermes config failed validation; backup restoration also failed "
+                f"validation: {restore_exc}"
+            ) from exc
+        raise RuntimeError(
+            f"Hermes config update failed and was restored from backup: {exc}"
+        ) from exc
 
 
 def _install_presets(plans: list[Plan]) -> tuple[Path, dict[str, Any]]:
@@ -235,10 +336,16 @@ def _install_presets(plans: list[Plan]) -> tuple[Path, dict[str, Any]]:
     problems = validate_moa_payload(new_moa)
     if problems:
         raise RuntimeError("Invalid generated MoA config: " + "; ".join(problems))
-    backup = _backup_hermes_config()
-    config["moa"] = normalize_moa_config(new_moa)
-    save_config(config)
-    return backup, config["moa"]
+    source, backup = _backup_hermes_config()
+    normalized_moa = normalize_moa_config(new_moa)
+    config["moa"] = normalized_moa
+    _save_config_with_rollback(
+        config,
+        save_config=save_config,
+        source=source,
+        backup=backup,
+    )
+    return backup, normalized_moa
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -254,6 +361,7 @@ def build_parser() -> argparse.ArgumentParser:
     recommend = sub.add_parser("recommend", help="Recommend fast, balanced and quality plans")
     recommend.add_argument("task")
     recommend.add_argument("--probe", action="store_true", help="Run live health checks")
+    recommend.add_argument("--refresh-probe", action="store_true", help="Ignore cached health results")
     recommend.add_argument("--timeout", type=int, default=180)
     recommend.add_argument("--json", action="store_true")
 
@@ -261,6 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("task")
     run.add_argument("--plan", choices=("fast", "balanced", "quality"), required=True)
     run.add_argument("--no-probe", action="store_true")
+    run.add_argument("--refresh-probe", action="store_true", help="Ignore cached health results")
     run.add_argument("--timeout", type=int, default=240)
     run.add_argument("--yes", action="store_true", help="Confirm the displayed model-call budget")
     run.add_argument("--json", action="store_true")
@@ -271,6 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="复杂、高风险的通用任务，需要独立分析、工具执行和最终审查",
     )
     install.add_argument("--no-probe", action="store_true")
+    install.add_argument("--refresh-probe", action="store_true", help="Ignore cached health results")
     install.add_argument("--timeout", type=int, default=180)
     install.add_argument("--yes", action="store_true", help="Confirm config backup and write")
     install.add_argument("--json", action="store_true")
@@ -284,51 +394,102 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "recommend":
-        profile, models, plans, diagnostics = prepare_recommendation(
-            args.task, live_probe=args.probe, timeout=args.timeout
+        (
+            profile,
+            models,
+            plans,
+            diagnostics,
+            probe_call_count,
+            probe_cache_hit_count,
+        ) = prepare_recommendation(
+            args.task,
+            live_probe=args.probe,
+            timeout=args.timeout,
+            refresh_probe=args.refresh_probe,
         )
-        _print_recommendation(profile, models, plans, diagnostics, args.json)
+        _print_recommendation(
+            profile,
+            models,
+            plans,
+            diagnostics,
+            probe_call_count,
+            probe_cache_hit_count,
+            args.json,
+        )
         return 0
 
     if args.command == "run":
         if not args.yes:
             raise SystemExit("Refusing to execute model calls without --yes")
-        profile, models, plans, diagnostics = prepare_recommendation(
-            args.task, live_probe=not args.no_probe, timeout=args.timeout
+        (
+            profile,
+            models,
+            plans,
+            diagnostics,
+            probe_call_count,
+            probe_cache_hit_count,
+        ) = prepare_recommendation(
+            args.task,
+            live_probe=not args.no_probe,
+            timeout=args.timeout,
+            refresh_probe=args.refresh_probe,
         )
         plan = next(plan for plan in plans if plan.id == args.plan)
         runner = CouncilRunner(HermesInvoker(timeout=args.timeout), max_workers=3)
         result = runner.run(args.task, plan)
+        payload = _result_payload(
+            result,
+            probe_call_count=probe_call_count,
+            probe_cache_hit_count=probe_cache_hit_count,
+        )
         if args.json:
-            print(json.dumps(_result_payload(result), ensure_ascii=False, indent=2))
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(result.final)
             if result.failures:
                 print("\nDegraded participants:", file=sys.stderr)
                 for failure in result.failures:
                     print(f"- {failure}", file=sys.stderr)
-            print(f"\n[model-council calls: {result.call_count}]", file=sys.stderr)
+            print(
+                "\n[model-council calls: "
+                f"probe={probe_call_count}, execution={result.call_count}, "
+                f"total={payload['total_call_count']}, cache_hits={probe_cache_hit_count}]",
+                file=sys.stderr,
+            )
         return 0
 
     if args.command == "install-presets":
         if not args.yes:
             raise SystemExit("Refusing to modify Hermes config without --yes")
-        profile, models, plans, diagnostics = prepare_recommendation(
-            args.task, live_probe=not args.no_probe, timeout=args.timeout
+        (
+            profile,
+            models,
+            plans,
+            diagnostics,
+            probe_call_count,
+            probe_cache_hit_count,
+        ) = prepare_recommendation(
+            args.task,
+            live_probe=not args.no_probe,
+            timeout=args.timeout,
+            refresh_probe=args.refresh_probe,
         )
         backup, moa = _install_presets(plans)
+        preset_names = list((moa.get("presets") or {}).keys())
         payload = {
             "backup": str(backup),
             "default_preset": moa.get("default_preset"),
-            "presets": list((moa.get("presets") or {}).keys()),
+            "presets": preset_names,
             "health_diagnostics": diagnostics,
+            "probe_call_count": probe_call_count,
+            "probe_cache_hit_count": probe_cache_hit_count,
         }
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(f"Installed native Hermes MoA presets. Backup: {backup}")
             print(f"Default preset: {payload['default_preset']}")
-            print("Presets: " + ", ".join(payload["presets"]))
+            print("Presets: " + ", ".join(preset_names))
         return 0
 
     return 2

@@ -3,15 +3,27 @@ import unittest
 from model_council.cli import (
     _merge_health,
     _only_verified,
+    _result_payload,
     plan_to_dict,
     probe_candidates,
 )
 from model_council.health import ProbeResult
 from model_council.inventory import ModelSpec
 from model_council.recommender import Participant, Plan
+from model_council.runner import CouncilResult
 
 
 class CliHelperTests(unittest.TestCase):
+    def test_result_payload_discloses_probe_execution_and_total_calls(self):
+        result = CouncilResult("fast", "ok", (), (), (), 1)
+
+        payload = _result_payload(result, probe_call_count=3, probe_cache_hit_count=2)
+
+        self.assertEqual(payload["probe_call_count"], 3)
+        self.assertEqual(payload["probe_cache_hit_count"], 2)
+        self.assertEqual(payload["execution_call_count"], 1)
+        self.assertEqual(payload["total_call_count"], 4)
+
     def test_probe_candidates_are_unique_and_plan_serializes_without_secrets(self):
         sol = ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=None)
         claude = ModelSpec("anthropic", "claude-opus-4-6", "anthropic", healthy=None)

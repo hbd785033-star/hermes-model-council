@@ -46,6 +46,23 @@ class RecommendPlansTests(unittest.TestCase):
         self.assertTrue(any("降级" in risk for risk in plans[1].risks))
         self.assertTrue(any("降级" in risk for risk in plans[2].risks))
 
+    def test_tool_task_does_not_claim_custom_runs_have_tools_or_shared_context(self):
+        models = [
+            ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=True),
+            ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=True),
+        ]
+        profile = TaskProfile("code", 4, 4, True, False, True)
+
+        plans = recommend_plans(profile, models)
+
+        for plan in plans:
+            with self.subTest(plan=plan.id):
+                claims = " ".join((*plan.strengths, *plan.risks))
+                self.assertNotIn("兼容工具调用和会话上下文", claims)
+                self.assertIn("原生 MoA", claims)
+                self.assertIn("工具", claims)
+                self.assertIn("隔离", claims)
+
     def test_rejects_empty_usable_inventory(self):
         models = [ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=False)]
         profile = TaskProfile("general", 1, 1, False, False, False)

@@ -7,7 +7,6 @@ from typing import Any
 
 from .recommender import Participant, Plan
 
-
 BALANCED_PRESET = "model-council-balanced"
 QUALITY_PRESET = "model-council-quality"
 
@@ -61,7 +60,10 @@ def build_native_moa_config(
     if "balanced" not in by_id or "quality" not in by_id:
         raise ValueError("balanced and quality plans are required")
     raw = deepcopy(existing) if isinstance(existing, dict) else {}
-    presets = deepcopy(raw.get("presets")) if isinstance(raw.get("presets"), dict) else {}
+    stored_presets = raw.get("presets")
+    presets: dict[str, Any] = (
+        deepcopy(stored_presets) if isinstance(stored_presets, dict) else {}
+    )
     presets[BALANCED_PRESET] = _preset(by_id["balanced"], reference_max_tokens=600)
     presets[QUALITY_PRESET] = _preset(by_id["quality"], reference_max_tokens=900)
     active = str(raw.get("active_preset") or "").strip()

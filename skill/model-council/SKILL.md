@@ -47,7 +47,7 @@ Run:
 python "C:\Users\DHB\AppData\Local\hermes\skills\model-council\scripts\model_council.py" recommend "<task>" --probe --json
 ```
 
-Completion criterion: JSON contains `task_profile`, `plans`, and live `health_diagnostics`; only verified models appear as available after probing.
+Completion criterion: JSON contains `task_profile`, `plans`, live `health_diagnostics`, `probe_call_count`, and `probe_cache_hit_count`; only verified models appear as available after probing. Successful health results are cached for 15 minutes and failures for 2 minutes to avoid repeated Hermes session overhead without masking transient recovery. Use `--refresh-probe` only when a fresh check is required.
 
 For sensitive input, do not probe or broadcast the full task until the user approves sending it to every Provider shown. First run `inventory --json`, describe the candidate Providers, and ask which Providers may receive the data.
 
@@ -88,7 +88,7 @@ python "C:\Users\DHB\AppData\Local\hermes\skills\model-council\scripts\model_cou
 - `balanced`: one independent advisor followed by one aggregator.
 - `quality`: parallel independent advisors, randomized anonymous responses, up to two peer reviews, and Chairman synthesis.
 
-Report actual `call_count`, every failed participant, and whether the result degraded. Never hide fallback or substitute a Provider silently.
+Report `probe_call_count`, `probe_cache_hit_count`, `execution_call_count`, `total_call_count`, every failed participant, and whether the result degraded. Never hide fallback or substitute a Provider silently. Hermes sessions use source `model-council`, so token usage can be inspected with `hermes insights --source model-council`.
 
 ### 5. Use native MoA for tool work
 

@@ -109,6 +109,12 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     if not usable:
         raise ValueError("No healthy or unverified models are available")
 
+    execution_risks = ["自定义 run 子会话隔离，不继承会话上下文"]
+    if profile.needs_tools:
+        execution_risks.append(
+            "自定义 run 禁用工具；工具任务应使用 Hermes 原生 MoA Preset"
+        )
+
     fast_model = _rank(usable, profile, "fast")[0]
     fast = Plan(
         id="fast",
@@ -118,7 +124,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
         estimated_calls=1,
         max_calls=1,
         strengths=("最低延迟", "只调用一个模型"),
-        risks=("没有独立交叉检查",),
+        risks=("没有独立交叉检查", *execution_risks),
     )
 
     if len(usable) == 1:
@@ -133,7 +139,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
                 estimated_calls=1,
                 max_calls=1,
                 strengths=("保留已验证模型的可用结果", "不制造虚假多模型共识"),
-                risks=("仅有一个已验证健康模型，本方案已降级为单模型",),
+                risks=("仅有一个已验证健康模型，本方案已降级为单模型", *execution_risks),
             )
 
         return [
@@ -154,7 +160,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
             model for model in _rank(balanced_usable, profile, "advisor") if model != primary
         ]
     reference = references[0] if references else primary
-    balanced_risks = ["增加一次参考模型调用"]
+    balanced_risks = ["增加一次参考模型调用", *execution_risks]
     if reference.family == primary.family:
         balanced_risks.append("当前没有第二个可用模型家族，独立性有限")
     balanced = Plan(
@@ -167,7 +173,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
         ),
         estimated_calls=2,
         max_calls=3,
-        strengths=("复用 Hermes 原生 MoA", "兼容工具调用和会话上下文"),
+        strengths=("独立 Advisor 与 Aggregator", "模型调用复用 Hermes Provider 配置"),
         risks=tuple(balanced_risks),
     )
 
@@ -182,7 +188,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     quality_participants.append(
         Participant("chairman", chairman_model, _effort(profile, premium=True))
     )
-    quality_risks = ["调用次数与延迟最高", "匿名互评会消耗额外上下文"]
+    quality_risks = ["调用次数与延迟最高", "匿名互评会消耗额外上下文", *execution_risks]
     if len({model.family for model in advisors}) < 2:
         quality_risks.append("模型家族多样性不足")
     quality = Plan(

@@ -1,8 +1,10 @@
 import threading
 import time
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from model_council.health import _safe_error, probe_models
+from model_council.health import HealthCache, _safe_error, probe_models
 from model_council.inventory import ModelSpec
 
 
@@ -23,6 +25,23 @@ class ProbeModelsTests(unittest.TestCase):
         self.assertEqual([model.healthy for model in result.models], [True, False])
         self.assertEqual(result.diagnostics["openai-codex:gpt-5.6-sol"], "ok")
         self.assertIn("invalid credential", result.diagnostics["deepseek:deepseek-v4-pro"])
+
+    def test_rejects_response_that_only_mentions_health_ok(self):
+        model = ModelSpec("provider", "model", "family")
+
+        for output in (
+            "ERROR: could not produce HEALTH_OK",
+            "ERROR: request degraded\nHEALTH_OK",
+        ):
+            with self.subTest(output=output):
+                result = probe_models(
+                    [model],
+                    invoke=lambda *_, value=output: value,
+                    max_workers=1,
+                )
+
+                self.assertFalse(result.models[0].healthy)
+                self.assertIn("unexpected", result.diagnostics[model.key])
 
     def test_serializes_all_hermes_cli_health_probes(self):
         models = [
@@ -82,7 +101,7 @@ class ProbeModelsTests(unittest.TestCase):
             try:
                 start.wait(timeout=1)
                 probe_models([model], invoke=invoke, max_workers=1)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - capture thread assertion failures
                 errors.append(exc)
 
         threads = [
@@ -102,6 +121,41 @@ class ProbeModelsTests(unittest.TestCase):
 
         self.assertEqual(errors, [])
         self.assertEqual(max_active, 1)
+
+    def test_health_cache_reuses_fresh_results_without_storing_diagnostics(self):
+        model = ModelSpec("provider", "model", "family")
+        with TemporaryDirectory() as directory:
+            cache = HealthCache(
+                Path(directory) / "cache.json",
+                ttl_seconds=900,
+                failure_ttl_seconds=120,
+            )
+            failed = ModelSpec("provider", "failed", "family")
+            cache.store({model.key: True, failed.key: False}, now=1000)
+            self.assertEqual(
+                cache.load([model, failed], now=1001),
+                {model.key: True, failed.key: False},
+            )
+            self.assertEqual(cache.load([model, failed], now=1121), {model.key: True})
+            self.assertEqual(cache.load([model, failed], now=2000), {})
+            self.assertNotIn("diagnostic", cache.path.read_text(encoding="utf-8"))
+
+    def test_cache_update_preserves_existing_entry_timestamp(self):
+        first = ModelSpec("provider", "first", "family")
+        second = ModelSpec("provider", "second", "family")
+        with TemporaryDirectory() as directory:
+            cache = HealthCache(Path(directory) / "cache.json", ttl_seconds=900)
+            cache.store({first.key: True}, now=1000)
+            cache.store({second.key: True}, now=1100)
+
+            self.assertEqual(
+                cache.load([first, second], now=1101),
+                {first.key: True, second.key: True},
+            )
+            self.assertEqual(
+                cache.load([first, second], now=1901),
+                {second.key: True},
+            )
 
 
 if __name__ == "__main__":
