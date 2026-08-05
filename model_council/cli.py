@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,7 +23,11 @@ from .presets import build_native_moa_config
 from .recommender import Plan, recommend_plans
 from .runner import CouncilResult, CouncilRunner
 
-_HEALTH_CACHE_PATH = Path(__file__).resolve().parents[1] / "artifacts" / "health-cache.json"
+_HEALTH_CACHE_PATH = (
+    Path(os.environ.get("MODEL_COUNCIL_CACHE_DIR", ""))
+    if os.environ.get("MODEL_COUNCIL_CACHE_DIR")
+    else Path.home() / ".cache" / "hermes-model-council" / "health-cache.json"
+)
 _HEALTH_CACHE_TTL_SECONDS = 900
 
 

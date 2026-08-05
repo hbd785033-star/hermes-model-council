@@ -15,7 +15,15 @@ class AnalyzeTaskTests(unittest.TestCase):
         self.assertGreaterEqual(profile.complexity, 3)
         self.assertTrue(profile.benefits_from_diversity)
 
-    def test_chinese_production_refactor_is_complex(self):
+    def test_english_terms_use_word_boundaries(self):
+        self.assertEqual(analyze_task("capital is important").kind, "general")
+        self.assertEqual(analyze_task("protest the government policy").kind, "general")
+        profile = analyze_task("analyze the API and its authentication")
+        self.assertEqual(profile.kind, "code")
+        self.assertGreaterEqual(profile.complexity, 1)
+        profile2 = analyze_task("run all tests and fix the bug")
+        self.assertEqual(profile2.kind, "code")
+        self.assertGreaterEqual(profile2.complexity, 1)
         profile = analyze_task("为生产认证系统设计安全重构方案并实现测试")
 
         self.assertEqual(profile.kind, "code")

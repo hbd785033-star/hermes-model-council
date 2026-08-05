@@ -178,7 +178,9 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     )
 
     advisors = _diverse_selection(_rank(usable, profile, "advisor"), min(3, len(usable)))
-    chairman_model = _rank(usable, profile, "chairman")[0]
+    advisor_keys = {model.key for model in advisors}
+    chairman_pool = [m for m in usable if m.key not in advisor_keys] or usable
+    chairman_model = _rank(chairman_pool, profile, "chairman")[0]
     reviewer_count = min(2, len(advisors))
     calls = len(advisors) + reviewer_count + 1
     quality_participants = [
@@ -189,8 +191,11 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
         Participant("chairman", chairman_model, _effort(profile, premium=True))
     )
     quality_risks = ["调用次数与延迟最高", "匿名互评会消耗额外上下文", *execution_risks]
+    if chairman_model.key in advisor_keys:
+        quality_risks.append("没有独立的Chairman模型，已降级与Advisor同源")
     if len({model.family for model in advisors}) < 2:
         quality_risks.append("模型家族多样性不足")
+    quality_risks.append("评审者与候选答案可能重叠，匿名化可缓解但不能消除自我偏好")
     quality = Plan(
         id="quality",
         label="质量优先/Council",

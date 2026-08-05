@@ -17,3 +17,8 @@ model-council = "model_council.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["model_council*"]
+
+[tool.mypy]
+strict = false
+ignore_missing_imports = true
+exclude = ["tests/"]

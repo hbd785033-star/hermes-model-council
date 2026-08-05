@@ -100,6 +100,7 @@ python -m model_council install-presets --yes
 - 子进程使用参数数组，`shell=False`，避免命令注入。
 - 错误信息进行常见凭据格式脱敏。
 - Council 候选与 peer review 都会隐藏 Provider、模型型号及常见模型家族别名，并随机化候选顺序。
+- 任务正文通过命令行 `hermes chat -q` 的 argv 参数传入，在本机进程列表中可见；敏感内容建议先确认 Provider 集合，再运行含正文的推荐/执行命令。
 - 同一敏感任务发送给多个云 Provider 前，必须由用户选择方案。
 - 已知失败的 Provider 不会静默换另一个未验证型号。
 
