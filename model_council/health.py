@@ -123,7 +123,14 @@ class HealthCache:
                     temporary.write(json.dumps(payload, ensure_ascii=True, indent=2) + "\n")
                     temporary.flush()
                     os.fsync(temporary.fileno())
-                os.replace(temporary_path, self.path)
+                for attempt in range(3):
+                    try:
+                        os.replace(temporary_path, self.path)
+                        break
+                    except OSError:
+                        if attempt == 2:
+                            raise
+                        time.sleep(0.02 * (attempt + 1))
             finally:
                 try:
                     temporary_path.unlink()
