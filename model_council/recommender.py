@@ -38,6 +38,11 @@ _BUDGET_NAMES = ("luna", "haiku", "mini", "flash")
 _PREMIUM_NAMES = ("fable", "opus", "sol-pro", "sol", "pro")
 
 
+def _normalized_model_name(name: str) -> str:
+    """Normalize provider aliases enough to detect same-model cross-provider reuse."""
+    return " ".join(str(name or "").casefold().split())
+
+
 def _tier_score(model: ModelSpec) -> float:
     name = model.model.lower()
     score = 2.0
@@ -105,7 +110,11 @@ def _effort(profile: TaskProfile, premium: bool = False) -> str:
 
 def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]:
     """Return fast, balanced, and quality plans; never select known-broken models."""
-    usable = [model for model in models if model.healthy is not False]
+    usable_by_key: dict[str, ModelSpec] = {}
+    for model in models:
+        if model.healthy is not False:
+            usable_by_key.setdefault(model.key, model)
+    usable = list(usable_by_key.values())
     if not usable:
         raise ValueError("No healthy or unverified models are available")
 
@@ -153,11 +162,21 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     references = [
         model
         for model in _diverse_selection(_rank(balanced_usable, profile, "advisor"), 3)
-        if model != primary
+        if (
+            model != primary
+            and _normalized_model_name(model.model)
+            != _normalized_model_name(primary.model)
+        )
     ]
     if not references:
         references = [
-            model for model in _rank(balanced_usable, profile, "advisor") if model != primary
+            model
+            for model in _rank(balanced_usable, profile, "advisor")
+            if (
+                model != primary
+                and _normalized_model_name(model.model)
+                != _normalized_model_name(primary.model)
+            )
         ]
     reference = references[0] if references else primary
     balanced_advisors: list[Participant] = []
@@ -177,6 +196,8 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     balanced_risks = ["增加参考模型调用", *execution_risks]
     if reference.family == primary.family:
         balanced_risks.append("当前没有第二个可用模型家族，独立性有限")
+    if _normalized_model_name(reference.model) == _normalized_model_name(primary.model):
+        balanced_risks.append("Advisor 与 Aggregator 使用同名模型，独立性有限")
     balanced = Plan(
         id="balanced",
         label="均衡/MoA",
@@ -188,12 +209,22 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
         risks=tuple(balanced_risks),
     )
 
-    advisor_limit = min(3, len(usable) - 1)
+    distinct_model_names = {
+        _normalized_model_name(model.model) for model in usable
+    }
+    advisor_limit = min(3, max(1, len(distinct_model_names) - 1))
     advisors = _diverse_selection(
         _rank(usable, profile, "advisor"), advisor_limit
     )
     advisor_keys = {model.key for model in advisors}
-    chairman_pool = [m for m in usable if m.key not in advisor_keys] or usable
+    advisor_names = {_normalized_model_name(model.model) for model in advisors}
+    chairman_pool = [
+        model
+        for model in usable
+        if model.key not in advisor_keys
+        and _normalized_model_name(model.model) not in advisor_names
+    ]
+    chairman_pool = chairman_pool or [m for m in usable if m.key not in advisor_keys] or usable
     chairman_model = _rank(chairman_pool, profile, "chairman")[0]
     reviewer_count = min(2, len(advisors))
     calls = len(advisors) + reviewer_count + 1
@@ -207,9 +238,11 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     quality_risks = ["调用次数与延迟最高", "匿名互评会消耗额外上下文", *execution_risks]
     if chairman_model.key in advisor_keys:
         quality_risks.append("没有独立的Chairman模型，已降级与Advisor同源")
+    if _normalized_model_name(chairman_model.model) in advisor_names:
+        quality_risks.append("没有独立的Chairman模型名，已降级与Advisor同名")
     if len({model.family for model in advisors}) < 2:
         quality_risks.append("模型家族多样性不足")
-    quality_risks.append("评审者与候选答案可能重叠，匿名化可缓解但不能消除自我偏好")
+    quality_risks.append("评审者也参与候选生成，但不评审自己的候选答案")
     quality = Plan(
         id="quality",
         label="质量优先/Council",

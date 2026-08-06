@@ -2,7 +2,7 @@ import unittest
 
 from model_council.inventory import ModelSpec
 from model_council.recommender import Participant, Plan
-from model_council.runner import CouncilRunner
+from model_council.runner import CouncilRunner, _failure_code
 
 
 class CouncilRunnerTests(unittest.TestCase):
@@ -97,6 +97,12 @@ class CouncilRunnerTests(unittest.TestCase):
         failures = " ".join(result.failures)
         self.assertNotIn(models[0].key, failures)
         self.assertNotIn(models[1].key, failures)
+
+    def test_failure_diagnostics_use_safe_reason_codes(self):
+        self.assertEqual(_failure_code(RuntimeError("timed out after 240s using secret:model")), "timeout")
+        self.assertEqual(_failure_code(RuntimeError("provider returned HTTP 429")), "rate_limited")
+        self.assertEqual(_failure_code(RuntimeError("authentication failed using secret:model")), "authentication")
+        self.assertEqual(_failure_code(RuntimeError("unexpected provider failure")), "runtimeerror")
 
     def test_single_path_clips_task_before_fixed_prompt_suffix(self):
         model = ModelSpec("provider-a", "model-a", "family-a")

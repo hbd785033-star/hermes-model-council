@@ -8,7 +8,6 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -156,37 +155,37 @@ def probe_models(
     invoke: Callable[[ModelSpec, str, str, str], str],
     max_workers: int = 3,
 ) -> ProbeResult:
-    """Probe models concurrently with one minimal, tool-free completion each."""
+    """Probe models serially with one minimal, tool-free completion each.
+
+    ``max_workers`` is retained for call-site compatibility. Hermes CLI probes
+    are intentionally serialized because concurrent child sessions are not a
+    supported safety boundary.
+    """
     if not models:
         return ProbeResult((), {})
     health: dict[int, bool] = {}
     diagnostics: dict[str, str] = {}
 
-    def invoke_serialized(model: ModelSpec) -> str:
-        with _GLOBAL_PROBE_LOCK:
-            return invoke(
-                model,
-                "Configuration health check. Reply with exactly HEALTH_OK.",
-                "health-check",
-                "low",
-            )
-
-    with ThreadPoolExecutor(max_workers=min(max(1, max_workers), len(models))) as pool:
-        futures = {
-            pool.submit(invoke_serialized, model): (index, model)
-            for index, model in enumerate(models)
-        }
-        for future in as_completed(futures):
-            index, model = futures[future]
-            try:
-                output = str(future.result() or "").strip()
-                if output != "HEALTH_OK":
-                    raise RuntimeError("unexpected health-check response")
-                health[index] = True
-                diagnostics[model.key] = "ok"
-            except Exception as exc:  # noqa: BLE001 - provider boundary
-                health[index] = False
-                diagnostics[model.key] = _safe_error(exc)
+    _ = max_workers
+    for index, model in enumerate(models):
+        try:
+            with _GLOBAL_PROBE_LOCK:
+                output = str(
+                    invoke(
+                        model,
+                        "Configuration health check. Reply with exactly HEALTH_OK.",
+                        "health-check",
+                        "low",
+                    )
+                    or ""
+                ).strip()
+            if output != "HEALTH_OK":
+                raise RuntimeError("unexpected health-check response")
+            health[index] = True
+            diagnostics[model.key] = "ok"
+        except Exception as exc:  # noqa: BLE001 - provider boundary
+            health[index] = False
+            diagnostics[model.key] = _safe_error(exc)
     updated = tuple(
         replace(model, healthy=health.get(index, False))
         for index, model in enumerate(models)

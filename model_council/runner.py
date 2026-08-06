@@ -21,6 +21,20 @@ _MAX_INVOKER_PROMPT_CHARS = 24000
 _TRUNCATION_MARKER = "\n[content truncated for stage prompt budget]"
 
 
+def _failure_code(exc: Exception) -> str:
+    """Return a useful failure reason without exposing provider or model identity."""
+    text = str(exc or "").casefold()
+    if isinstance(exc, TimeoutError) or "timed out" in text or "timeout" in text:
+        return "timeout"
+    if "429" in text or "rate limit" in text or "rate_limit" in text:
+        return "rate_limited"
+    if any(term in text for term in ("authentication", "unauthorized", "401", "403")):
+        return "authentication"
+    if "empty response" in text:
+        return "empty_response"
+    return type(exc).__name__.casefold()
+
+
 @dataclass(frozen=True)
 class CouncilResult:
     plan_id: str
@@ -102,7 +116,7 @@ class CouncilRunner:
                     completed[index] = (participant, text)
                 except Exception as exc:  # noqa: BLE001 - model invocation boundary
                     failures.append(
-                        f"{role_prefix}-{index + 1} failed: {type(exc).__name__}"
+                        f"{role_prefix}-{index + 1} failed: {_failure_code(exc)}"
                     )
         return [completed[index] for index in sorted(completed)], failures, len(participants)
 
@@ -202,7 +216,7 @@ class CouncilRunner:
             )
         except Exception as exc:  # noqa: BLE001 - model invocation boundary
             failures.append(
-                f"aggregator failed: {type(exc).__name__}"
+                f"aggregator failed: {_failure_code(exc)}"
             )
             final = answers[0][1]
         return CouncilResult(plan.id, final, (), (), tuple(failures), calls + 1)
@@ -300,7 +314,7 @@ class CouncilRunner:
             )
         except Exception as exc:  # noqa: BLE001 - model invocation boundary
             failures.append(
-                f"chairman failed: {type(exc).__name__}"
+                f"chairman failed: {_failure_code(exc)}"
             )
             label, text = anonymous_answers[0]
             final = f"Candidate {label}:\n{text}"

@@ -80,7 +80,7 @@ class RecommendPlansTests(unittest.TestCase):
         chairman = quality.chairman
         self.assertNotIn(chairman.model.key, advisor_keys)
         self.assertNotIn("同源", " ".join(quality.risks))
-        self.assertIn("评审者与候选答案可能重叠", " ".join(quality.risks))
+        self.assertIn("不评审自己的候选答案", " ".join(quality.risks))
 
     def test_quality_reserves_chairman_slot_with_three_models(self):
         models = [
@@ -97,6 +97,37 @@ class RecommendPlansTests(unittest.TestCase):
         }
         self.assertNotIn(quality.chairman.model.key, advisor_keys)
         self.assertLessEqual(len(advisor_keys), 2)
+
+    def test_quality_does_not_reuse_same_model_name_through_another_provider(self):
+        models = [
+            ModelSpec("galaxy-gpt", "gpt-5.6-sol", "openai", healthy=True),
+            ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=True),
+            ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=True),
+            ModelSpec("ccswitch-claude", "claude-sonnet-4-6", "anthropic", healthy=True),
+        ]
+        quality = recommend_plans(
+            TaskProfile("decision", 5, 5, False, False, True), models
+        )[2]
+
+        advisor_names = {
+            p.model.model.lower()
+            for p in quality.participants
+            if p.role.startswith("advisor")
+        }
+        self.assertNotIn(quality.chairman.model.model.lower(), advisor_names)
+
+    def test_quality_risk_describes_cross_role_bias_after_self_exclusion(self):
+        models = [
+            ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=True),
+            ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=True),
+        ]
+        quality = recommend_plans(
+            TaskProfile("decision", 5, 5, False, False, True), models
+        )[2]
+
+        risks = " ".join(quality.risks)
+        self.assertIn("不评审自己的候选答案", risks)
+        self.assertNotIn("评审者与候选答案可能重叠", risks)
 
     def test_rejects_empty_usable_inventory(self):
         models = [ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=False)]
