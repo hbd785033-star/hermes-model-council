@@ -44,10 +44,10 @@ _CHINESE_COMPLEX = {"架构", "多步骤", "迁移", "分布式", "根因", "审
 _CHINESE_TOOLS = _CHINESE_CODE | {"文件", "终端", "浏览器", "网站", "仓库"}
 
 _BOUNDARY_PATTERN = re.compile(
-    r"\b(" + "|".join(re.escape(t) for t in sorted(
+    r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(t) for t in sorted(
         _ENGLISH_CODE | _ENGLISH_RESEARCH | _ENGLISH_DECISION |
         _ENGLISH_HIGH_RISK | _ENGLISH_COMPLEX | _ENGLISH_TOOLS,
-        key=len, reverse=True)) + r")\b"
+        key=len, reverse=True)) + r")(?![A-Za-z0-9_])"
 )
 
 

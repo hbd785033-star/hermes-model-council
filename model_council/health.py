@@ -27,7 +27,9 @@ def _exclusive_lock(path: Path, *, timeout: float = 5.0):
     while descriptor is None:
         try:
             descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
+            # Windows may report an existing/open lock as PermissionError
+            # instead of FileExistsError while another thread/process owns it.
             try:
                 stale = time.time() - path.stat().st_mtime > 30
             except OSError:

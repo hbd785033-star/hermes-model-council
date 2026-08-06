@@ -170,8 +170,9 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
             seen_families.add(ref.family)
     if not balanced_advisors:
         balanced_advisors = [Participant("advisor", primary, _effort(profile))]
-    balanced_participants = tuple(
-        [*balanced_advisors, Participant("aggregator", primary, _effort(profile, premium=True))]
+    balanced_participants = (
+        *balanced_advisors,
+        Participant("aggregator", primary, _effort(profile, premium=True)),
     )
     balanced_risks = ["增加参考模型调用", *execution_risks]
     if reference.family == primary.family:
@@ -187,7 +188,10 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
         risks=tuple(balanced_risks),
     )
 
-    advisors = _diverse_selection(_rank(usable, profile, "advisor"), min(3, len(usable)))
+    advisor_limit = min(3, len(usable) - 1)
+    advisors = _diverse_selection(
+        _rank(usable, profile, "advisor"), advisor_limit
+    )
     advisor_keys = {model.key for model in advisors}
     chairman_pool = [m for m in usable if m.key not in advisor_keys] or usable
     chairman_model = _rank(chairman_pool, profile, "chairman")[0]

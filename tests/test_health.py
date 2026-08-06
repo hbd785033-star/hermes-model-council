@@ -1,9 +1,9 @@
+import shutil
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
-import shutil
 
 from model_council.health import HealthCache, _safe_error, probe_models
 from model_council.inventory import ModelSpec

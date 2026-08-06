@@ -17,6 +17,7 @@ _MAX_STAGE_TASK_CHARS = 6000
 _MAX_REFERENCE_BLOCK_CHARS = 14000
 _MAX_CHAIRMAN_ANSWER_CHARS = 9000
 _MAX_CHAIRMAN_REVIEW_CHARS = 7000
+_MAX_INVOKER_PROMPT_CHARS = 24000
 _TRUNCATION_MARKER = "\n[content truncated for stage prompt budget]"
 
 
@@ -68,7 +69,11 @@ class CouncilRunner:
 
     def _run_single(self, task: str, plan: Plan) -> CouncilResult:
         actor = plan.chairman
-        prompt = f"{task}\n\nReturn a concise final answer in at most 1,200 words."
+        suffix = "\n\nReturn a concise final answer in at most 1,200 words."
+        prompt = self._clip(
+            task,
+            _MAX_INVOKER_PROMPT_CHARS - len(suffix),
+        ) + suffix
         final = self.invoke(actor.model, prompt, "actor", actor.reasoning_effort)
         return CouncilResult(plan.id, final, (), (), (), 1)
 
@@ -97,8 +102,7 @@ class CouncilRunner:
                     completed[index] = (participant, text)
                 except Exception as exc:  # noqa: BLE001 - model invocation boundary
                     failures.append(
-                        f"{role_prefix}-{index + 1} ({participant.model.key}) failed: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"{role_prefix}-{index + 1} failed: {type(exc).__name__}"
                     )
         return [completed[index] for index in sorted(completed)], failures, len(participants)
 
@@ -168,7 +172,11 @@ class CouncilRunner:
 
     def _run_moa(self, task: str, plan: Plan) -> CouncilResult:
         aggregator = plan.chairman
-        advisors = [participant for participant in plan.participants if participant is not aggregator]
+        advisors = [
+            participant
+            for participant in plan.participants
+            if participant.role.startswith("advisor")
+        ]
         if not advisors:
             return self._run_single(task, plan)
         prompts = [self._advisor_prompt(task, participant.role) for participant in advisors]
@@ -194,8 +202,7 @@ class CouncilRunner:
             )
         except Exception as exc:  # noqa: BLE001 - model invocation boundary
             failures.append(
-                f"aggregator ({aggregator.model.key}) failed: "
-                f"{type(exc).__name__}: {exc}"
+                f"aggregator failed: {type(exc).__name__}"
             )
             final = answers[0][1]
         return CouncilResult(plan.id, final, (), (), tuple(failures), calls + 1)
@@ -229,20 +236,38 @@ class CouncilRunner:
             )
             for index, (_, text) in enumerate(shuffled)
         )
-        answer_block = self._bounded_block(
-            [(f"Response {label}", text) for label, text in anonymous_answers],
-            _MAX_REFERENCE_BLOCK_CHARS,
-        )
-        review_prompt = (
-            "You are peer-reviewing anonymized council answers. Model identities are intentionally "
-            "hidden. Judge only correctness, evidence, completeness, and actionable value.\n\n"
-            f"TASK:\n{self._clip(task, _MAX_STAGE_TASK_CHARS)}\n\n{answer_block}\n\n"
-            "Return at most 800 words: strongest response, largest blind spot, key disagreement, "
-            "and what all answers missed."
-        )
         reviewers = advisors[: min(2, len(advisors))]
+        review_prompts = []
+        for reviewer in reviewers:
+            reviewer_answers = [
+                (participant, text)
+                for participant, text in raw_answers
+                if participant.model.key != reviewer.model.key
+            ]
+            reviewer_rng = random.Random(rng.random())
+            reviewer_rng.shuffle(reviewer_answers)
+            reviewer_models = [participant.model for participant, _ in reviewer_answers]
+            reviewer_anonymous = tuple(
+                (
+                    chr(ord("A") + index),
+                    self._scrub_identities(text, reviewer_models),
+                )
+                for index, (_, text) in enumerate(reviewer_answers)
+            )
+            reviewer_block = self._bounded_block(
+                [(f"Response {label}", text) for label, text in reviewer_anonymous],
+                _MAX_REFERENCE_BLOCK_CHARS,
+            ) or "No other candidate answer succeeded."
+            review_prompts.append(
+                "You are peer-reviewing anonymized council answers. Model identities are intentionally "
+                "hidden. Judge only correctness, evidence, completeness, and actionable value.\n\n"
+                f"TASK:\n{self._clip(task, _MAX_STAGE_TASK_CHARS)}\n\n"
+                f"{reviewer_block}\n\n"
+                "Return at most 800 words: strongest response, largest blind spot, key disagreement, "
+                "and what all answers missed."
+            )
         reviews_raw, review_failures, review_calls = self._parallel(
-            reviewers, [review_prompt] * len(reviewers), "reviewer"
+            reviewers, review_prompts, "reviewer"
         )
         failures.extend(review_failures)
         reviews = tuple(
@@ -275,8 +300,7 @@ class CouncilRunner:
             )
         except Exception as exc:  # noqa: BLE001 - model invocation boundary
             failures.append(
-                f"chairman ({chairman.model.key}) failed: "
-                f"{type(exc).__name__}: {exc}"
+                f"chairman failed: {type(exc).__name__}"
             )
             label, text = anonymous_answers[0]
             final = f"Candidate {label}:\n{text}"

@@ -82,6 +82,22 @@ class RecommendPlansTests(unittest.TestCase):
         self.assertNotIn("同源", " ".join(quality.risks))
         self.assertIn("评审者与候选答案可能重叠", " ".join(quality.risks))
 
+    def test_quality_reserves_chairman_slot_with_three_models(self):
+        models = [
+            ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=True),
+            ModelSpec("anthropic", "claude-opus-4-6", "anthropic", healthy=True),
+            ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=True),
+        ]
+        quality = recommend_plans(
+            TaskProfile("decision", 5, 5, False, False, True), models
+        )[2]
+
+        advisor_keys = {
+            p.model.key for p in quality.participants if p.role.startswith("advisor")
+        }
+        self.assertNotIn(quality.chairman.model.key, advisor_keys)
+        self.assertLessEqual(len(advisor_keys), 2)
+
     def test_rejects_empty_usable_inventory(self):
         models = [ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=False)]
         profile = TaskProfile("general", 1, 1, False, False, False)

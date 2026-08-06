@@ -1,9 +1,15 @@
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from model_council.cli import (
+    _health_cache_path,
     _merge_health,
     _only_verified,
     _result_payload,
+    _store_health_cache,
     plan_to_dict,
     probe_candidates,
 )
@@ -14,6 +20,23 @@ from model_council.runner import CouncilResult
 
 
 class CliHelperTests(unittest.TestCase):
+    def test_cache_dir_environment_variable_resolves_to_health_cache_file(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"MODEL_COUNCIL_CACHE_DIR": directory}
+        ):
+            self.assertEqual(
+                _health_cache_path(), Path(directory) / "health-cache.json"
+            )
+
+    def test_cache_write_failure_is_non_fatal(self):
+        class FailingCache:
+            def store(self, health):
+                raise PermissionError("read-only cache")
+
+        with patch("model_council.cli.print") as mocked_print:
+            self.assertFalse(_store_health_cache(FailingCache(), {"model": True}))
+        mocked_print.assert_called_once()
+
     def test_result_payload_discloses_probe_execution_and_total_calls(self):
         result = CouncilResult("fast", "ok", (), (), (), 1)
 

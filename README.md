@@ -99,7 +99,7 @@ python -m model_council install-presets --yes
 - 不读取或输出 Token、API Key、OAuth 内容。
 - 子进程使用参数数组，`shell=False`，避免命令注入。
 - 错误信息进行常见凭据格式脱敏。
-- Council 候选与 peer review 都会隐藏 Provider、模型型号及常见模型家族别名，并随机化候选顺序。
+- Council 候选、peer review 和失败诊断默认都隐藏 Provider、模型型号及常见模型家族别名，并随机化候选顺序。
 - 任务正文通过命令行 `hermes chat -q` 的 argv 参数传入，在本机进程列表中可见；敏感内容建议先确认 Provider 集合，再运行含正文的推荐/执行命令。
 - 同一敏感任务发送给多个云 Provider 前，必须由用户选择方案。
 - 已知失败的 Provider 不会静默换另一个未验证型号。
@@ -115,6 +115,6 @@ python -m unittest discover -s tests -v
 - 成本展示目前以调用次数和模型档位为主；Hermes inventory 没有稳定返回价格时，不伪造美元估算。
 - 自定义 Council 通过命令行传递提示词，单次提示限制为 24,000 字符；跨阶段材料会按预算裁剪并显式标记。
 - 自定义子调用的输出长度通过角色提示软约束（Advisor/Reviewer 800 词，Actor/Aggregator/Chairman 1,200 词）；Hermes CLI 暂无 Provider 级输出 Token 参数。原生 MoA Preset 使用硬性 `max_tokens=4096`，参考输出为 600/900 Token。
-- live probe 结果只持久化模型键、健康布尔值和检查时间，不保存任务、模型输出或错误详情；缓存文件位于被 Git 忽略的 `artifacts/health-cache.json`。
+- live probe 结果只持久化模型键、健康布尔值和检查时间，不保存任务、模型输出或错误详情；缓存文件默认位于用户缓存目录的 `hermes-model-council/health-cache.json`，也可用 `MODEL_COUNCIL_CACHE_DIR` 指定目录。缓存不可写时本次运行会跳过持久化，不会阻断推荐。
 - Hermes 子会话使用独立来源标签 `model-council`，可通过 `hermes insights --source model-council` 查看实际 Token 使用。
 - 模型能力评分是可解释规则，尚未使用历史反馈训练路由器。

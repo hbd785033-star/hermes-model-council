@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -23,12 +22,31 @@ from .presets import build_native_moa_config
 from .recommender import Plan, recommend_plans
 from .runner import CouncilResult, CouncilRunner
 
-_HEALTH_CACHE_PATH = (
-    Path(os.environ.get("MODEL_COUNCIL_CACHE_DIR", ""))
-    if os.environ.get("MODEL_COUNCIL_CACHE_DIR")
-    else Path.home() / ".cache" / "hermes-model-council" / "health-cache.json"
-)
+
+def _health_cache_path() -> Path:
+    configured_dir = os.environ.get("MODEL_COUNCIL_CACHE_DIR")
+    cache_dir = (
+        Path(configured_dir)
+        if configured_dir
+        else Path.home() / ".cache" / "hermes-model-council"
+    )
+    return cache_dir / "health-cache.json"
+
+
+_HEALTH_CACHE_PATH = _health_cache_path()
 _HEALTH_CACHE_TTL_SECONDS = 900
+
+
+def _store_health_cache(cache: HealthCache, health: dict[str, bool]) -> bool:
+    try:
+        cache.store(health)
+    except OSError as exc:
+        print(
+            f"Health cache write skipped: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def model_to_dict(model: ModelSpec) -> dict[str, Any]:
@@ -151,7 +169,10 @@ def prepare_recommendation(
             probe_call_count += len(result.models)
             checked.update(model.key for model in result.models)
             diagnostics.update(result.diagnostics)
-            cache.store({model.key: bool(model.healthy) for model in result.models})
+            _store_health_cache(
+                cache,
+                {model.key: bool(model.healthy) for model in result.models},
+            )
             models = _merge_health(models, result)
             plans = recommend_plans(profile, models)
         models = _only_verified(models)

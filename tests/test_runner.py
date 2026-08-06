@@ -44,7 +44,7 @@ class CouncilRunnerTests(unittest.TestCase):
         self.assertEqual(len(result.anonymous_answers), 2)
         self.assertEqual(len(result.reviews), 2)
         review_prompts = [prompt for _, prompt, role, _ in calls if role.startswith("reviewer")]
-        self.assertTrue(all("Response A" in prompt and "Response B" in prompt for prompt in review_prompts))
+        self.assertTrue(all("Response " in prompt for prompt in review_prompts))
         self.assertTrue(all("gpt-5.6-sol" not in prompt for prompt in review_prompts))
         self.assertTrue(all("claude-opus-4-6" not in prompt for prompt in review_prompts))
         self.assertEqual(result.call_count, 5)
@@ -68,6 +68,54 @@ class CouncilRunnerTests(unittest.TestCase):
         ):
             self.assertNotIn(identity, lowered)
         self.assertIn("[model identity hidden]", cleaned)
+
+    def test_failure_diagnostics_do_not_expose_model_identity(self):
+        models = [
+            ModelSpec("provider-a", "secret-model-a", "family-a"),
+            ModelSpec("provider-b", "secret-model-b", "family-b"),
+        ]
+        plan = Plan(
+            "quality", "Quality", "council",
+            (
+                Participant("advisor-1", models[0], "low"),
+                Participant("advisor-2", models[1], "low"),
+                Participant("chairman", models[1], "low"),
+            ),
+            5, 9, (), (),
+        )
+
+        def invoke(model, prompt, role, effort):
+            if model.key == models[0].key:
+                raise RuntimeError("temporary")
+            return "answer"
+
+        result = CouncilRunner(
+            invoke=invoke, max_workers=1
+        ).run("task", plan)
+
+        self.assertTrue(any("advisor-1" in failure for failure in result.failures))
+        failures = " ".join(result.failures)
+        self.assertNotIn(models[0].key, failures)
+        self.assertNotIn(models[1].key, failures)
+
+    def test_single_path_clips_task_before_fixed_prompt_suffix(self):
+        model = ModelSpec("provider-a", "model-a", "family-a")
+        plan = Plan(
+            "fast", "Fast", "single",
+            (Participant("actor", model, "low"),),
+            1, 1, (), (),
+        )
+        prompts = []
+
+        def invoke(model, prompt, role, effort):
+            prompts.append(prompt)
+            self.assertLessEqual(len(prompt), 24000)
+            return "FINAL"
+
+        result = CouncilRunner(invoke=invoke).run("T" * 24000, plan)
+
+        self.assertEqual(result.final, "FINAL")
+        self.assertEqual(len(prompts), 1)
 
     def test_peer_review_outputs_are_scrubbed_before_chairman(self):
         models = [
@@ -105,6 +153,39 @@ class CouncilRunnerTests(unittest.TestCase):
         for identity in ("claude", "anthropic", "gpt-5.6-sol"):
             self.assertNotIn(identity, review_text)
             self.assertNotIn(identity, chairman_text)
+
+    def test_each_peer_reviewer_does_not_review_its_own_answer(self):
+        models = [
+            ModelSpec("provider-a", "model-a", "family-a"),
+            ModelSpec("provider-b", "model-b", "family-b"),
+        ]
+        plan = Plan(
+            "quality", "Quality", "council",
+            (
+                Participant("advisor-1", models[0], "high"),
+                Participant("advisor-2", models[1], "high"),
+                Participant("chairman", models[0], "high"),
+            ),
+            5, 9, (), (),
+        )
+        review_prompts = []
+
+        def invoke(model, prompt, role, effort):
+            if role.startswith("advisor"):
+                return "ANSWER_A" if model.key == models[0].key else "ANSWER_B"
+            if role.startswith("reviewer"):
+                review_prompts.append((model.key, prompt))
+                return "review"
+            return "final"
+
+        CouncilRunner(invoke=invoke, max_workers=1).run("task", plan, seed=1)
+
+        self.assertEqual(len(review_prompts), 2)
+        for model_key, prompt in review_prompts:
+            own_answer = "ANSWER_A" if model_key == models[0].key else "ANSWER_B"
+            other_answer = "ANSWER_B" if model_key == models[0].key else "ANSWER_A"
+            self.assertNotIn(own_answer, prompt)
+            self.assertIn(other_answer, prompt)
 
     def test_council_bounds_intermediate_outputs_to_prompt_limit(self):
         models = [

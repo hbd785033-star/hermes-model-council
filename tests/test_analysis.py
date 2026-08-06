@@ -24,6 +24,9 @@ class AnalyzeTaskTests(unittest.TestCase):
         profile2 = analyze_task("run all tests and fix the bug")
         self.assertEqual(profile2.kind, "code")
         self.assertGreaterEqual(profile2.complexity, 1)
+        mixed = analyze_task("API接口")
+        self.assertEqual(mixed.kind, "code")
+        self.assertTrue(mixed.needs_tools)
         profile = analyze_task("为生产认证系统设计安全重构方案并实现测试")
 
         self.assertEqual(profile.kind, "code")
