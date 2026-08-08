@@ -18,6 +18,7 @@ from .analysis import TaskProfile, analyze_task
 from .health import HealthCache, ProbeResult, probe_models
 from .hermes_invoker import HermesInvoker
 from .inventory import ModelSpec, discover_models
+from .performance import build_performance_report
 from .presets import build_native_moa_config
 from .recommender import Plan, recommend_plans
 from .runner import CouncilResult, CouncilRunner
@@ -440,6 +441,15 @@ def build_parser() -> argparse.ArgumentParser:
     record_outcome.add_argument("--failure-code", default=None)
     record_outcome.add_argument("--telemetry-path", type=Path, default=None)
     record_outcome.add_argument("--json", action="store_true")
+
+    performance = sub.add_parser(
+        "performance-report", help="Build a read-only offline plan performance report"
+    )
+    performance.add_argument("--task-kind", required=True)
+    performance.add_argument("--baseline-plan", default="fast")
+    performance.add_argument("--minimum-samples", type=int, default=30)
+    performance.add_argument("--telemetry-path", type=Path, default=None)
+    performance.add_argument("--json", action="store_true")
     return parser
 
 
@@ -603,6 +613,33 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(f"Recorded final outcome for {args.run_id}: {event_id}")
+        return 0
+
+    if args.command == "performance-report":
+        store = TelemetryStore.open_read_only(args.telemetry_path or _telemetry_path())
+        report = build_performance_report(
+            store.summarize_runs(task_kind=args.task_kind),
+            task_kind=args.task_kind,
+            baseline_plan=args.baseline_plan,
+            minimum_samples=args.minimum_samples,
+        )
+        payload = report.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(
+                f"Performance report: task={report.task_kind}, ready={report.ready}, "
+                f"minimum_samples={report.minimum_samples}"
+            )
+            for plan_metrics in report.plans:
+                print(
+                    f"- {plan_metrics.plan_id}: n={plan_metrics.known_outcomes}, "
+                    f"success={plan_metrics.success_rate}, "
+                    f"score_regret={plan_metrics.score_regret}, "
+                    f"latency_regret_ms={plan_metrics.latency_regret_ms}"
+                )
+            for warning in report.warnings:
+                print(f"warning: {warning}", file=sys.stderr)
         return 0
 
     return 2

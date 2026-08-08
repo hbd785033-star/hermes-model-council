@@ -44,6 +44,16 @@ class CliHelperTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args(["record-outcome", "--run-id", "run-1", "--outcome", "maybe"])
 
+    def test_performance_report_parser_is_read_only_and_configurable(self):
+        args = build_parser().parse_args(
+            ["performance-report", "--task-kind", "security_review",
+             "--baseline-plan", "fast", "--minimum-samples", "40", "--json"]
+        )
+        self.assertEqual(args.task_kind, "security_review")
+        self.assertEqual(args.baseline_plan, "fast")
+        self.assertEqual(args.minimum_samples, 40)
+        self.assertTrue(args.json)
+
     def test_telemetry_path_uses_explicit_environment_directory(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {"MODEL_COUNCIL_TELEMETRY_DIR": directory}

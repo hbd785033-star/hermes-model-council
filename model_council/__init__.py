@@ -21,6 +21,7 @@ from .evidence import (
     EvidenceGateResult,
     EvidenceStatus,
 )
+from .performance import PerformanceReport, PlanPerformance, build_performance_report
 from .telemetry import (
     FeedbackKind,
     OutcomeEvent,
@@ -52,9 +53,12 @@ __all__ = [
     "OutcomeEvent",
     "OutcomeKind",
     "PerformanceSummary",
+    "PerformanceReport",
+    "PlanPerformance",
     "RunPerformanceSummary",
     "TaskProfile",
     "TelemetryInvoker",
     "TelemetryStore",
     "analyze_task",
+    "build_performance_report",
 ]

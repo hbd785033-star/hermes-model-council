@@ -281,6 +281,21 @@ class TelemetryStoreTests(unittest.TestCase):
             self.assertTrue(store.integrity_check())
             self.assertEqual(store.schema_version(), 2)
 
+    def test_read_only_store_can_summarize_but_cannot_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "telemetry.db"
+            writable = TelemetryStore(path)
+            writable.record(self._event())
+            readonly = TelemetryStore.open_read_only(path)
+
+            self.assertEqual(readonly.count_events(), 1)
+            with self.assertRaisesRegex(RuntimeError, "read-only"):
+                readonly.record(self._event("event-2"))
+
+            missing = Path(directory) / "missing.db"
+            with self.assertRaisesRegex(FileNotFoundError, "does not exist"):
+                TelemetryStore.open_read_only(missing)
+
     def test_migrates_v1_token_column_to_nullable_v2(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "telemetry.db"

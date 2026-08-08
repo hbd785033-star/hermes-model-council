@@ -102,6 +102,19 @@ python -m model_council record-outcome \
 
 `record-outcome` 从该 run 的 per-call 事件反查任务类型、复杂度/风险、plan、累计调用数和延迟，然后写入独立 `role=run` 事件。相同 run ID 的最终 outcome 不可覆盖；`summarize_runs()` 只聚合 `role=run`，不会把“模型 API 调用成功”误当成“任务答案正确”。
 
+积累足够 run outcomes 后可生成只读离线绩效报告：
+
+```bash
+python -m model_council performance-report \
+  --task-kind security_review \
+  --baseline-plan fast \
+  --minimum-samples 30 \
+  --telemetry-path "D:/ModelCouncilData/outcomes.db" \
+  --json
+```
+
+报告按 plan 展示已知 outcome 数、成功率与 Wilson 95% 区间、正反馈率、外部 Eval 均分、延迟/调用/已知 Token 均值，并分别计算 success、score 和 latency regret。未知 outcome 不进入成功率分母；低于最小样本量的 plan 不计算 regret。报告不生成单一综合分或 `recommended_plan`，也不会写数据库或修改 Router。
+
 ## 安装
 
 项目默认位于：

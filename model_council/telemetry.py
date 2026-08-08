@@ -170,6 +170,7 @@ class TelemetryStore:
 
     def __init__(self, path: Path, *, retention_days: int = 90) -> None:
         self.path = Path(path)
+        self._read_only = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.retention_days = max(1, int(retention_days))
         connection = self._connect()
@@ -190,6 +191,22 @@ class TelemetryStore:
             connection.commit()
         finally:
             connection.close()
+
+    @classmethod
+    def open_read_only(cls, path: Path) -> "TelemetryStore":
+        resolved = Path(path).resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"telemetry database does not exist: {resolved}")
+        store = cls.__new__(cls)
+        store.path = resolved
+        store.retention_days = 90
+        store._read_only = True
+        version = store.schema_version()
+        if version != _SCHEMA_VERSION:
+            raise RuntimeError(
+                f"read-only telemetry requires schema version {_SCHEMA_VERSION}; found {version}"
+            )
+        return store
 
     @staticmethod
     def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
@@ -246,7 +263,11 @@ class TelemetryStore:
             raise
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=5)
+        if self._read_only:
+            uri = f"{self.path.resolve().as_uri()}?mode=ro"
+            connection = sqlite3.connect(uri, timeout=5, uri=True)
+        else:
+            connection = sqlite3.connect(self.path, timeout=5)
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
@@ -257,6 +278,8 @@ class TelemetryStore:
         return value.astimezone(timezone.utc).isoformat()
 
     def record(self, event: OutcomeEvent, *, now: datetime | None = None) -> None:
+        if self._read_only:
+            raise RuntimeError("telemetry store is read-only")
         current = now or datetime.now(timezone.utc)
         cutoff = current - timedelta(days=self.retention_days)
         occurred_at = self._utc_timestamp(datetime.fromisoformat(event.occurred_at))

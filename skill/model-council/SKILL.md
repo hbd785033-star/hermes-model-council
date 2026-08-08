@@ -122,6 +122,8 @@ Telemetry is opt-in and prompt-free. The CLI requires `--telemetry` (optionally 
 
 Final task outcomes are externally assessed and immutable. Use `record-outcome` with the emitted `telemetry_run_id`; never infer task success from a successful API call or let the Chairman overwrite the outcome. Run-level performance summaries must filter `role=run` so call availability cannot masquerade as answer correctness.
 
+Performance reports are offline and non-routing. Require a visible minimum sample threshold, preserve unknown outcomes, show Wilson intervals and metric-specific regret, and never collapse quality, latency, and cost into an unexplained composite winner or automatic Router update.
+
 ## Privacy Rules
 
 - Never place credentials in prompts, logs, project files, or summaries.
