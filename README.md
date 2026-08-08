@@ -9,7 +9,7 @@
 - 三档 Pareto 方案：
   - `fast`：单模型基线，1 次调用。
   - `balanced`：一至多个不同模型的 Advisor → Aggregator，通常 2～4 次调用；以输出的 `estimated_calls` 为准。
-  - `quality`：并行独立回答 → 匿名互评 → Chairman，默认最多 9 次调用。
+  - `quality`：至少两个成功候选时执行并行独立回答 → 稳定匿名 ID 互评 → Chairman，默认最多 9 次调用；候选不足时跳过空评审并显式降级。
 - 实时健康探测；只有清理后的完整响应严格等于 `HEALTH_OK` 才视为健康，live probe 后只有实际通过的型号才会被推荐。
 - 调用预算、阶段提示预算、并发上限、超时、失败披露和 Provider 降级。
 - 生成 Hermes 原生 `model-council-balanced` / `model-council-quality` MoA Preset。
@@ -69,7 +69,7 @@ python -m model_council recommend '审查生产认证代码并给出修复方案
 
 `--probe` 会进行最小、无工具的 `HEALTH_OK` 调用。成功结果默认缓存 15 分钟，失败结果只缓存 2 分钟，避免短任务重复承担 Hermes 子会话的固定上下文成本，同时不会长时间放大瞬时故障；使用 `--refresh-probe` 可强制重新探测。
 
-JSON 输出会分别报告 `probe_call_count`、`probe_cache_hit_count`、`execution_call_count` 和 `total_call_count`。旧字段 `call_count` 保留为执行阶段调用数。这些字段统计 Model Council 发起的 Hermes 子会话；Provider 内部对 429 等错误的 HTTP 重试不由 Hermes CLI 暴露，因此不计入。
+JSON 输出会分别报告 `probe_call_count`、`probe_cache_hit_count`、`execution_call_count` 和 `total_call_count`。旧字段 `call_count` 保留为执行阶段调用数。执行结果还包含 `degraded`、`degradation_reason`、`candidate_count`、`review_coverage`、`fallback_source` 和 `task_truncated`，避免把降级路径伪装成完整 Council。这些字段统计 Model Council 发起的 Hermes 子会话；Provider 内部对 429 等错误的 HTTP 重试不由 Hermes CLI 暴露，因此不计入。
 
 健康探测有意串行执行，避免并发 Hermes CLI 子会话产生状态竞争；15 分钟成功缓存用于降低重复探测延迟。
 
@@ -101,7 +101,7 @@ python -m model_council install-presets --yes
 - 不读取或输出 Token、API Key、OAuth 内容。
 - 子进程使用参数数组，`shell=False`，避免命令注入。
 - 错误信息进行常见凭据格式脱敏。
-- Council 候选、peer review 和失败诊断默认都隐藏 Provider、模型型号及常见模型家族别名，并随机化候选顺序；失败诊断仅显示席位和安全原因码（如 `timeout`、`rate_limited`）。
+- Council 候选、peer review 和失败诊断默认都隐藏 Provider、模型型号及常见模型家族别名，并随机化候选顺序；每个候选的匿名 ID 在 Reviewer 与 Chairman 阶段保持稳定，失败诊断仅显示席位和安全原因码（如 `timeout`、`rate_limited`）。
 - 任务正文通过命令行 `hermes chat -q` 的 argv 参数传入，在本机进程列表中可见；敏感内容建议先确认 Provider 集合，再运行含正文的推荐/执行命令。
 - 同一敏感任务发送给多个云 Provider 前，必须由用户选择方案。
 - 已知失败的 Provider 不会静默换另一个未验证型号。

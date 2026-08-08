@@ -38,14 +38,33 @@ class CliHelperTests(unittest.TestCase):
         mocked_print.assert_called_once()
 
     def test_result_payload_discloses_probe_execution_and_total_calls(self):
-        result = CouncilResult("fast", "ok", (), (), (), 1)
+        result = CouncilResult(
+            "quality",
+            "ok",
+            (("A", "answer"),),
+            (),
+            ("reviewer-1 failed: timeout",),
+            2,
+            degraded=True,
+            degradation_reason="insufficient_candidates",
+            candidate_count=1,
+            review_coverage=0.0,
+            fallback_source="A",
+            task_truncated=True,
+        )
 
         payload = _result_payload(result, probe_call_count=3, probe_cache_hit_count=2)
 
         self.assertEqual(payload["probe_call_count"], 3)
         self.assertEqual(payload["probe_cache_hit_count"], 2)
-        self.assertEqual(payload["execution_call_count"], 1)
-        self.assertEqual(payload["total_call_count"], 4)
+        self.assertEqual(payload["execution_call_count"], 2)
+        self.assertEqual(payload["total_call_count"], 5)
+        self.assertTrue(payload["degraded"])
+        self.assertEqual(payload["degradation_reason"], "insufficient_candidates")
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertEqual(payload["review_coverage"], 0.0)
+        self.assertEqual(payload["fallback_source"], "A")
+        self.assertTrue(payload["task_truncated"])
 
     def test_probe_candidates_are_unique_and_plan_serializes_without_secrets(self):
         sol = ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=None)

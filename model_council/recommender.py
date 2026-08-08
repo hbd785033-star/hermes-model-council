@@ -226,7 +226,8 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     ]
     chairman_pool = chairman_pool or [m for m in usable if m.key not in advisor_keys] or usable
     chairman_model = _rank(chairman_pool, profile, "chairman")[0]
-    reviewer_count = min(2, len(advisors))
+    has_peer_review = len(advisors) >= 2
+    reviewer_count = min(2, len(advisors)) if has_peer_review else 0
     calls = len(advisors) + reviewer_count + 1
     quality_participants = [
         Participant(f"advisor-{index}", model, _effort(profile, premium=True))
@@ -235,7 +236,13 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     quality_participants.append(
         Participant("chairman", chairman_model, _effort(profile, premium=True))
     )
-    quality_risks = ["调用次数与延迟最高", "匿名互评会消耗额外上下文", *execution_risks]
+    quality_risks = ["调用次数与延迟最高", *execution_risks]
+    quality_strengths = ["独立生成", "Chairman 仲裁"]
+    if has_peer_review:
+        quality_strengths.insert(1, "匿名互评")
+        quality_risks.append("匿名互评会消耗额外上下文")
+    else:
+        quality_risks.append("仅有一个独立候选，运行时将跳过 Peer Review 并显式降级")
     if chairman_model.key in advisor_keys:
         quality_risks.append("没有独立的Chairman模型，已降级与Advisor同源")
     if _normalized_model_name(chairman_model.model) in advisor_names:
@@ -250,7 +257,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
         participants=tuple(quality_participants),
         estimated_calls=calls,
         max_calls=9,
-        strengths=("独立生成", "匿名互评", "Chairman 仲裁"),
+        strengths=tuple(quality_strengths),
         risks=tuple(quality_risks),
     )
     return [fast, balanced, quality]

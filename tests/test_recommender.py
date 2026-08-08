@@ -3,6 +3,7 @@ import unittest
 from model_council.analysis import TaskProfile
 from model_council.inventory import ModelSpec
 from model_council.recommender import recommend_plans
+from model_council.runner import CouncilRunner
 
 
 class RecommendPlansTests(unittest.TestCase):
@@ -128,6 +129,41 @@ class RecommendPlansTests(unittest.TestCase):
         risks = " ".join(quality.risks)
         self.assertIn("不评审自己的候选答案", risks)
         self.assertNotIn("评审者与候选答案可能重叠", risks)
+
+    def test_two_model_quality_plan_does_not_advertise_or_budget_empty_peer_review(self):
+        models = [
+            ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=True),
+            ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=True),
+        ]
+
+        quality = recommend_plans(
+            TaskProfile("decision", 5, 5, False, False, True), models
+        )[2]
+
+        self.assertEqual(quality.estimated_calls, 2)
+        self.assertNotIn("匿名互评", " ".join(quality.strengths))
+        self.assertIn("跳过 Peer Review", " ".join(quality.risks))
+
+    def test_two_model_recommended_quality_executes_only_advisor_and_chairman(self):
+        models = [
+            ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=True),
+            ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=True),
+        ]
+        quality = recommend_plans(
+            TaskProfile("decision", 5, 5, False, False, True), models
+        )[2]
+        roles = []
+
+        def invoke(model, prompt, role, effort):
+            roles.append(role)
+            return role
+
+        result = CouncilRunner(invoke=invoke, max_workers=1).run("task", quality)
+
+        self.assertEqual(roles, ["advisor-1", "chairman"])
+        self.assertEqual(result.call_count, quality.estimated_calls)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.degradation_reason, "insufficient_candidates")
 
     def test_rejects_empty_usable_inventory(self):
         models = [ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=False)]

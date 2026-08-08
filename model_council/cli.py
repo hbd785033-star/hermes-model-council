@@ -280,6 +280,12 @@ def _result_payload(
         ],
         "reviews": list(result.reviews),
         "failures": list(result.failures),
+        "degraded": result.degraded,
+        "degradation_reason": result.degradation_reason,
+        "candidate_count": result.candidate_count,
+        "review_coverage": result.review_coverage,
+        "fallback_source": result.fallback_source,
+        "task_truncated": result.task_truncated,
         "call_count": result.call_count,
         "probe_call_count": probe_call_count,
         "probe_cache_hit_count": probe_cache_hit_count,
@@ -473,6 +479,15 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(result.final)
+            if result.degraded:
+                print(
+                    "\n[model-council degraded: "
+                    f"reason={result.degradation_reason}, candidates={result.candidate_count}, "
+                    f"review_coverage={result.review_coverage:.2f}, "
+                    f"fallback={result.fallback_source or 'none'}, "
+                    f"task_truncated={'yes' if result.task_truncated else 'no'}]",
+                    file=sys.stderr,
+                )
             if result.failures:
                 print("\nDegraded participants:", file=sys.stderr)
                 for failure in result.failures:

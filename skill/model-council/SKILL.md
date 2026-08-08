@@ -57,7 +57,7 @@ Always show:
 
 1. `fast` — one-model baseline;
 2. `balanced` — Advisor → Aggregator;
-3. `quality` — independent answers → anonymous peer review → Chairman.
+3. `quality` — independent answers → stable-ID anonymous peer review → Chairman; if fewer than two candidates can be produced, show the explicit degraded path instead of claiming peer review.
 
 For each choice include:
 
@@ -109,8 +109,8 @@ Use `model-council-quality` only when the extra calls have a clear quality role.
 ## Council Protocol
 
 1. **Independent generation** — assign different lenses; do not show answers to other advisors.
-2. **Anonymization** — randomize labels `Response A/B/C`; remove model and Provider identifiers.
-3. **Peer review** — rank correctness, evidence, completeness, blind spots, and disagreement.
+2. **Anonymization** — assign each candidate one stable opaque label, randomize display order without relabeling it, and remove model and Provider identifiers.
+3. **Peer review** — require at least two successful candidates; rank correctness, evidence, completeness, blind spots, and disagreement without self-review.
 4. **Chairman** — state agreement, preserve meaningful disagreement, identify blind spots, make one recommendation, and give the first concrete action.
 5. **Disclosure** — return call count, failures, degraded paths, and limitations.
 
@@ -130,6 +130,7 @@ Use `model-council-quality` only when the extra calls have a clear quality role.
 4. **Rotating through unverified models after failure.** Failed representative candidates disable that Provider for the run.
 5. **Showing brands during review.** Reviewers see anonymous labels only.
 6. **Executing before approval.** Recommendation and execution are separate steps.
+7. **Claiming peer review with one candidate.** Skip the empty reviewer stage and disclose `degraded=true`, `degradation_reason=insufficient_candidates`, and `review_coverage=0`.
 
 ## Verification Checklist
 
@@ -140,4 +141,6 @@ Use `model-council-quality` only when the extra calls have a clear quality role.
 - [ ] Call budget and privacy warning were visible
 - [ ] User selected a plan before execution
 - [ ] Failures and fallback were disclosed
+- [ ] Candidate IDs stayed stable across Reviewer and Chairman prompts
+- [ ] Peer review ran only with at least two successful candidates
 - [ ] Tool-requiring work used native MoA rather than custom tool-free Council
