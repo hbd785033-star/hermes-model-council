@@ -10,6 +10,8 @@ from model_council.cli import (
     _only_verified,
     _result_payload,
     _store_health_cache,
+    _telemetry_path,
+    build_parser,
     plan_to_dict,
     probe_candidates,
 )
@@ -20,6 +22,23 @@ from model_council.runner import CouncilResult
 
 
 class CliHelperTests(unittest.TestCase):
+    def test_run_telemetry_is_explicit_opt_in(self):
+        parser = build_parser()
+        default_args = parser.parse_args(["run", "task", "--plan", "fast", "--yes"])
+        opt_in_args = parser.parse_args(
+            ["run", "task", "--plan", "fast", "--yes", "--telemetry", "--telemetry-path", "D:/events.db"]
+        )
+
+        self.assertFalse(default_args.telemetry)
+        self.assertTrue(opt_in_args.telemetry)
+        self.assertEqual(opt_in_args.telemetry_path, Path("D:/events.db"))
+
+    def test_telemetry_path_uses_explicit_environment_directory(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"MODEL_COUNCIL_TELEMETRY_DIR": directory}
+        ):
+            self.assertEqual(_telemetry_path(), Path(directory) / "outcomes.db")
+
     def test_cache_dir_environment_variable_resolves_to_health_cache_file(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {"MODEL_COUNCIL_CACHE_DIR": directory}

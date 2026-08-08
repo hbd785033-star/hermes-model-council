@@ -8,10 +8,16 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Callable
+
+from .analysis import TaskProfile
+from .inventory import ModelSpec
 
 
 class OutcomeKind(str, Enum):
@@ -29,7 +35,7 @@ class FeedbackKind(str, Enum):
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9_./:-]{1,128}$")
 _SAFE_CODE = re.compile(r"^[a-z0-9_.:-]{1,64}$")
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -48,7 +54,7 @@ class OutcomeEvent:
     evaluator_score: float | None
     latency_ms: int
     execution_calls: int
-    total_tokens: int
+    total_tokens: int | None
     failure_code: str | None
     feedback: FeedbackKind
     policy_version: str
@@ -81,7 +87,11 @@ class OutcomeEvent:
             raise ValueError("risk must be between 1 and 5")
         if self.evaluator_score is not None and not 0.0 <= float(self.evaluator_score) <= 1.0:
             raise ValueError("evaluator_score must be between 0 and 1")
-        if int(self.latency_ms) < 0 or int(self.execution_calls) < 0 or int(self.total_tokens) < 0:
+        if (
+            int(self.latency_ms) < 0
+            or int(self.execution_calls) < 0
+            or (self.total_tokens is not None and int(self.total_tokens) < 0)
+        ):
             raise ValueError("latency, calls, and tokens must not be negative")
         if self.failure_code is not None and not _SAFE_CODE.fullmatch(self.failure_code):
             raise ValueError("failure_code contains unsafe characters")
@@ -100,8 +110,13 @@ class PerformanceSummary:
     sample_count: int
     successes: int
     failures: int
+    unknown_outcomes: int
+    positive_feedback: int
+    negative_feedback: int
     mean_score: float | None
     mean_latency_ms: float | None
+    mean_execution_calls: float | None
+    mean_total_tokens: float | None
 
 
 _SCHEMA = """
@@ -124,7 +139,7 @@ CREATE TABLE IF NOT EXISTS outcome_events (
     evaluator_score REAL,
     latency_ms INTEGER NOT NULL,
     execution_calls INTEGER NOT NULL,
-    total_tokens INTEGER NOT NULL,
+    total_tokens INTEGER,
     failure_code TEXT,
     feedback TEXT NOT NULL CHECK (feedback IN ('positive', 'negative', 'none')),
     policy_version TEXT NOT NULL
@@ -152,11 +167,67 @@ class TelemetryStore:
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
                     (str(_SCHEMA_VERSION),),
                 )
+            elif row[0] == "1":
+                self._migrate_v1_to_v2(connection)
             elif row[0] != str(_SCHEMA_VERSION):
                 raise RuntimeError(f"unsupported telemetry schema version: {row[0]}")
             connection.commit()
         finally:
             connection.close()
+
+    @staticmethod
+    def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+        """Make token counts nullable while preserving all v1 outcome rows."""
+        try:
+            connection.execute("DROP INDEX IF EXISTS idx_outcome_task_model")
+            connection.execute("ALTER TABLE outcome_events RENAME TO outcome_events_v1")
+            connection.execute(
+                """CREATE TABLE outcome_events (
+                    event_id TEXT PRIMARY KEY,
+                    occurred_at TEXT NOT NULL,
+                    task_kind TEXT NOT NULL,
+                    complexity INTEGER NOT NULL,
+                    risk INTEGER NOT NULL,
+                    plan_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    family TEXT NOT NULL,
+                    outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure', 'unknown')),
+                    evaluator_score REAL,
+                    latency_ms INTEGER NOT NULL,
+                    execution_calls INTEGER NOT NULL,
+                    total_tokens INTEGER,
+                    failure_code TEXT,
+                    feedback TEXT NOT NULL CHECK (feedback IN ('positive', 'negative', 'none')),
+                    policy_version TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO outcome_events (
+                    event_id, occurred_at, task_kind, complexity, risk, plan_id,
+                    role, provider, model, family, outcome, evaluator_score,
+                    latency_ms, execution_calls, total_tokens, failure_code,
+                    feedback, policy_version
+                )
+                SELECT event_id, occurred_at, task_kind, complexity, risk, plan_id,
+                       role, provider, model, family, outcome, evaluator_score,
+                       latency_ms, execution_calls, total_tokens, failure_code,
+                       feedback, policy_version
+                  FROM outcome_events_v1"""
+            )
+            connection.execute("DROP TABLE outcome_events_v1")
+            connection.execute(
+                """CREATE INDEX idx_outcome_task_model
+                       ON outcome_events(task_kind, provider, model)"""
+            )
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(_SCHEMA_VERSION),),
+            )
+        except Exception:
+            connection.rollback()
+            raise
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5)
@@ -232,7 +303,11 @@ class TelemetryStore:
                     """SELECT task_kind, provider, model, family, COUNT(*),
                               SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),
                               SUM(CASE WHEN outcome = 'failure' THEN 1 ELSE 0 END),
-                              AVG(evaluator_score), AVG(latency_ms)
+                              SUM(CASE WHEN outcome = 'unknown' THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN feedback = 'positive' THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN feedback = 'negative' THEN 1 ELSE 0 END),
+                              AVG(evaluator_score), AVG(latency_ms),
+                              AVG(execution_calls), AVG(total_tokens)
                        FROM outcome_events
                       GROUP BY task_kind, provider, model, family
                       ORDER BY task_kind, provider, model"""
@@ -242,7 +317,11 @@ class TelemetryStore:
                     """SELECT task_kind, provider, model, family, COUNT(*),
                               SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),
                               SUM(CASE WHEN outcome = 'failure' THEN 1 ELSE 0 END),
-                              AVG(evaluator_score), AVG(latency_ms)
+                              SUM(CASE WHEN outcome = 'unknown' THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN feedback = 'positive' THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN feedback = 'negative' THEN 1 ELSE 0 END),
+                              AVG(evaluator_score), AVG(latency_ms),
+                              AVG(execution_calls), AVG(total_tokens)
                        FROM outcome_events
                       WHERE task_kind = ?
                       GROUP BY task_kind, provider, model, family
@@ -272,3 +351,112 @@ class TelemetryStore:
             return int(row[0])
         finally:
             connection.close()
+
+
+class TelemetryInvoker:
+    """Record per-call metadata without persisting prompts or outputs."""
+
+    def __init__(
+        self,
+        *,
+        invoke: Callable[[ModelSpec, str, str, str], str],
+        store: TelemetryStore,
+        task_profile: TaskProfile,
+        plan_id: str,
+        run_id: str,
+        policy_version: str = "telemetry-v1",
+    ) -> None:
+        if not _SAFE_ID.fullmatch(run_id) or len(run_id) > 56:
+            raise ValueError("run_id must be a safe identifier of at most 56 characters")
+        if not _SAFE_LABEL.fullmatch(plan_id):
+            raise ValueError("plan_id contains unsafe characters")
+        self.invoke = invoke
+        self.store = store
+        self.task_profile = task_profile
+        self.plan_id = plan_id
+        self.run_id = run_id
+        self.policy_version = policy_version
+        self._counter = 0
+        self._counter_lock = threading.Lock()
+
+    def _next_event_id(self, role: str) -> str:
+        with self._counter_lock:
+            self._counter += 1
+            ordinal = self._counter
+        safe_role = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(role))[:64] or "unknown"
+        return f"{self.run_id}:{ordinal}:{safe_role}"
+
+    @staticmethod
+    def _failure_code(exc: Exception) -> str:
+        text = str(exc or "").casefold()
+        if "timeout" in text or isinstance(exc, TimeoutError):
+            return "timeout"
+        if "429" in text or "rate limit" in text:
+            return "rate_limited"
+        return "invocation_failure"
+
+    def _record(
+        self,
+        *,
+        event_id: str,
+        model: ModelSpec,
+        role: str,
+        outcome: OutcomeKind,
+        latency_ms: int,
+        failure_code: str | None,
+    ) -> None:
+        try:
+            self.store.record(
+                OutcomeEvent(
+                    event_id=event_id,
+                    occurred_at=datetime.now(timezone.utc).isoformat(),
+                    task_kind=self.task_profile.kind,
+                    complexity=self.task_profile.complexity,
+                    risk=self.task_profile.risk,
+                    plan_id=self.plan_id,
+                    role=role,
+                    provider=model.provider,
+                    model=model.model,
+                    family=model.family,
+                    outcome=outcome,
+                    evaluator_score=None,
+                    latency_ms=max(0, int(latency_ms)),
+                    execution_calls=1,
+                    total_tokens=None,
+                    failure_code=failure_code,
+                    feedback=FeedbackKind.NONE,
+                    policy_version=self.policy_version,
+                )
+            )
+        except Exception:
+            # Telemetry is best-effort and must not change the model-call path.
+            return
+
+    def __call__(
+        self, model: ModelSpec, prompt: str, role: str, reasoning_effort: str
+    ) -> str:
+        event_id = self._next_event_id(role)
+        started = time.perf_counter()
+        try:
+            result = self.invoke(model, prompt, role, reasoning_effort)
+        except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            self._record(
+                event_id=event_id,
+                model=model,
+                role=role,
+                outcome=OutcomeKind.FAILURE,
+                latency_ms=elapsed_ms,
+                failure_code=self._failure_code(exc),
+            )
+            raise
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        self._record(
+            event_id=event_id,
+            model=model,
+            role=role,
+            outcome=OutcomeKind.SUCCESS,
+            latency_ms=elapsed_ms,
+            failure_code=None,
+        )
+        return result

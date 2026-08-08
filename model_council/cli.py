@@ -21,6 +21,7 @@ from .inventory import ModelSpec, discover_models
 from .presets import build_native_moa_config
 from .recommender import Plan, recommend_plans
 from .runner import CouncilResult, CouncilRunner
+from .telemetry import TelemetryInvoker, TelemetryStore
 
 
 def _health_cache_path() -> Path:
@@ -31,6 +32,13 @@ def _health_cache_path() -> Path:
         else Path.home() / ".cache" / "hermes-model-council"
     )
     return cache_dir / "health-cache.json"
+
+
+def _telemetry_path() -> Path:
+    configured_dir = os.environ.get("MODEL_COUNCIL_TELEMETRY_DIR")
+    if configured_dir:
+        return Path(configured_dir) / "outcomes.db"
+    return Path.home() / ".cache" / "hermes-model-council" / "outcomes.db"
 
 
 _HEALTH_CACHE_PATH = _health_cache_path()
@@ -405,6 +413,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--refresh-probe", action="store_true", help="Ignore cached health results")
     run.add_argument("--timeout", type=int, default=240)
     run.add_argument("--yes", action="store_true", help="Confirm the displayed model-call budget")
+    run.add_argument("--telemetry", action="store_true", help="Opt in to prompt-free outcome telemetry")
+    run.add_argument("--telemetry-path", type=Path, default=None)
     run.add_argument("--json", action="store_true")
 
     install = sub.add_parser("install-presets", help="Install native Hermes MoA presets")
@@ -468,7 +478,25 @@ def main(argv: list[str] | None = None) -> int:
             refresh_probe=args.refresh_probe,
         )
         plan = next(plan for plan in plans if plan.id == args.plan)
-        runner = CouncilRunner(HermesInvoker(timeout=args.timeout), max_workers=3)
+        base_invoker = HermesInvoker(timeout=args.timeout)
+        invoker: Callable[[ModelSpec, str, str, str], str] = base_invoker
+        if args.telemetry:
+            try:
+                telemetry_store = TelemetryStore(args.telemetry_path or _telemetry_path())
+                run_id = datetime.now(UTC).strftime("run-%Y%m%dT%H%M%S%fZ")
+                invoker = TelemetryInvoker(
+                    invoke=base_invoker,
+                    store=telemetry_store,
+                    task_profile=profile,
+                    plan_id=plan.id,
+                    run_id=run_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - optional telemetry boundary
+                print(f"Telemetry disabled: {type(exc).__name__}", file=sys.stderr)
+                invoker = base_invoker
+        else:
+            invoker = base_invoker
+        runner = CouncilRunner(invoker, max_workers=3)
         result = runner.run(args.task, plan)
         payload = _result_payload(
             result,

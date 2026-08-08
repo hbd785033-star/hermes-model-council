@@ -4,10 +4,13 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from model_council.analysis import TaskProfile
+from model_council.inventory import ModelSpec
 from model_council.telemetry import (
     FeedbackKind,
     OutcomeEvent,
     OutcomeKind,
+    TelemetryInvoker,
     TelemetryStore,
 )
 
@@ -36,6 +39,63 @@ class TelemetryStoreTests(unittest.TestCase):
         }
         values.update(kwargs)
         return OutcomeEvent(**values)
+
+    def test_invoker_records_success_without_prompt_or_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TelemetryStore(Path(directory) / "telemetry.db")
+            invoker = TelemetryInvoker(
+                invoke=lambda model, prompt, role, effort: "SECRET MODEL OUTPUT",
+                store=store,
+                task_profile=TaskProfile("security_review", 4, 5, False, False, True),
+                plan_id="quality",
+                run_id="run-1",
+            )
+            result = invoker(
+                ModelSpec("provider-a", "model-a", "family-a"),
+                "SECRET USER PROMPT",
+                "advisor-1",
+                "high",
+            )
+            summary = store.summarize()
+
+        self.assertEqual(result, "SECRET MODEL OUTPUT")
+        self.assertEqual(summary[0].sample_count, 1)
+        self.assertEqual(summary[0].successes, 1)
+        self.assertEqual(summary[0].model, "model-a")
+
+    def test_invoker_records_failure_and_reraises_without_raw_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TelemetryStore(Path(directory) / "telemetry.db")
+
+            def fail(model, prompt, role, effort):
+                raise RuntimeError("provider secret=DO_NOT_STORE")
+
+            invoker = TelemetryInvoker(
+                invoke=fail,
+                store=store,
+                task_profile=TaskProfile("security_review", 4, 5, False, False, True),
+                plan_id="quality",
+                run_id="run-2",
+            )
+            with self.assertRaisesRegex(RuntimeError, "DO_NOT_STORE"):
+                invoker(ModelSpec("provider-a", "model-a", "family-a"), "prompt", "chairman", "high")
+            rows = store.summarize()
+
+        self.assertEqual(rows[0].failures, 1)
+        self.assertNotEqual(rows[0].model, "DO_NOT_STORE")
+        self.assertNotIn("DO_NOT_STORE", str(rows))
+
+    def test_invoker_rejects_run_id_that_cannot_produce_safe_event_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TelemetryStore(Path(directory) / "telemetry.db")
+            with self.assertRaisesRegex(ValueError, "run_id"):
+                TelemetryInvoker(
+                    invoke=lambda *args: "ok",
+                    store=store,
+                    task_profile=TaskProfile("security_review", 4, 5, False, False, True),
+                    plan_id="quality",
+                    run_id="r" * 100,
+                )
 
     def test_records_event_without_raw_prompt_or_output_columns(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -80,8 +140,13 @@ class TelemetryStoreTests(unittest.TestCase):
         self.assertEqual(summary[0].sample_count, 2)
         self.assertEqual(summary[0].successes, 1)
         self.assertEqual(summary[0].failures, 1)
+        self.assertEqual(summary[0].unknown_outcomes, 0)
+        self.assertEqual(summary[0].positive_feedback, 1)
+        self.assertEqual(summary[0].negative_feedback, 1)
         self.assertEqual(summary[0].mean_score, 0.55)
         self.assertEqual(summary[0].mean_latency_ms, 1000.0)
+        self.assertEqual(summary[0].mean_execution_calls, 3.0)
+        self.assertEqual(summary[0].mean_total_tokens, 800.0)
 
     def test_retention_purges_old_events_and_keeps_recent_events(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -113,7 +178,52 @@ class TelemetryStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 store.record(self._event())
             self.assertTrue(store.integrity_check())
-            self.assertEqual(store.schema_version(), 1)
+            self.assertEqual(store.schema_version(), 2)
+
+    def test_migrates_v1_token_column_to_nullable_v2(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "telemetry.db"
+            connection = sqlite3.connect(path)
+            try:
+                connection.executescript(
+                    """
+                    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO schema_meta VALUES ('schema_version', '1');
+                    CREATE TABLE outcome_events (
+                        event_id TEXT PRIMARY KEY, occurred_at TEXT NOT NULL,
+                        task_kind TEXT NOT NULL, complexity INTEGER NOT NULL, risk INTEGER NOT NULL,
+                        plan_id TEXT NOT NULL, role TEXT NOT NULL, provider TEXT NOT NULL,
+                        model TEXT NOT NULL, family TEXT NOT NULL, outcome TEXT NOT NULL,
+                        evaluator_score REAL, latency_ms INTEGER NOT NULL,
+                        execution_calls INTEGER NOT NULL, total_tokens INTEGER NOT NULL,
+                        failure_code TEXT, feedback TEXT NOT NULL, policy_version TEXT NOT NULL
+                    );
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            store = TelemetryStore(path)
+            invoker = TelemetryInvoker(
+                invoke=lambda *args: "ok",
+                store=store,
+                task_profile=TaskProfile("general", 1, 1, False, False, False),
+                plan_id="fast",
+                run_id="migrated-run",
+            )
+            invoker(ModelSpec("provider", "model", "family"), "prompt", "actor", "low")
+            connection = sqlite3.connect(path)
+            try:
+                token_value = connection.execute(
+                    "SELECT total_tokens FROM outcome_events"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            version = store.schema_version()
+
+        self.assertEqual(version, 2)
+        self.assertIsNone(token_value)
 
 
 if __name__ == "__main__":

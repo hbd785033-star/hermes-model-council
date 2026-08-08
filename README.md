@@ -78,7 +78,16 @@ store.record(OutcomeEvent(
 summary = store.summarize(task_kind="security_review")
 ```
 
-标识字段只允许受限 identifier 字符，避免把自由文本伪装成 `task_kind` 等字段写入；反馈只允许 `positive/negative/none`。默认保留 90 天，过期事件在同一次写入事务中清理或拒绝落盘。每个 SQLite 操作显式关闭连接，兼容 Windows 临时目录与文件锁语义，并提供 `integrity_check()`。当前 Store 不会自动修改 Router 权重。
+标识字段只允许受限 identifier 字符，避免把自由文本伪装成 `task_kind` 等字段写入；反馈只允许 `positive/negative/none`。默认保留 90 天，过期事件在同一次写入事务中清理或拒绝落盘。每个 SQLite 操作显式关闭连接，兼容 Windows 临时目录与文件锁语义，并提供 `integrity_check()`。当前 schema version 为 2；v1 数据库会原子迁移并保留历史事件，将 Token 列升级为可空。绩效聚合包含样本量、成功/失败/未知结果、正负反馈、平均 evaluator score、延迟、调用数和已知 Token 均值；未知 Token 不参与平均。当前 Store 不会自动修改 Router 权重。
+
+真实 Council 执行默认不写 telemetry；使用以下显式 opt-in：
+
+```bash
+python -m model_council run "任务" --plan quality --yes --telemetry
+python -m model_council run "任务" --plan quality --yes --telemetry --telemetry-path "D:/ModelCouncilData/outcomes.db"
+```
+
+`TelemetryInvoker` 为每次 Advisor/Reviewer/Aggregator/Chairman 调用记录一条事件；原 Prompt、模型输出和异常正文不会进入数据库。Hermes CLI 没有暴露单次调用 Token 数时存为 SQL `NULL`，不伪造为 0。Telemetry 初始化或写入失败采用 best-effort 降级，不改变原模型调用的返回值、异常或 Council fallback；`--telemetry-path` 只有与 `--telemetry` 同时使用才会创建数据库。
 
 ## 安装
 
