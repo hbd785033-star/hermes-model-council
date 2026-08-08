@@ -55,6 +55,8 @@ verdict = EvidenceGate(trusted_verifiers=(artifact.verifier,)).evaluate(
 
 `CitationVerifier` 只验证调用方预先允许的 HTTPS host 上是否存在指定原文摘录。它拒绝 userinfo、query、fragment、IP 字面量、非 443 端口和解析到非公网地址的 host；默认抓取器禁用自动重定向，并限制响应大小和文本内容类型。它证明的是“该来源包含这段原文”，不是自动证明原文推导出的结论正确；引用蕴含关系仍应作为独立 Eval。
 
+`EntailmentPolicy` 汇总受信 evaluator 对 Claim–Citation 关系的 `supported`、`contradicted` 或 `insufficient` 判断。不同 evaluator 同时给出支持和反驳时，结果降为 `insufficient` 并标记 disagreement；模型自评和未加入 allowlist 的 assessment 被忽略。该策略默认只 advisory；即使请求 hard gate，也必须先满足校准样本数、Pearson 相关性和严重误放行率阈值。默认阈值为至少 100 个 golden samples、Pearson ≥ 0.7、严重误放行率 ≤ 5%。
+
 ## 安装
 
 项目默认位于：

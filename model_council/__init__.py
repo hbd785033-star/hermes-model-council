@@ -1,6 +1,14 @@
 """Hermes Model Council."""
 
 from .analysis import TaskProfile, analyze_task
+from .entailment import (
+    EntailmentAssessment,
+    EntailmentClaimResult,
+    EntailmentPolicy,
+    EntailmentPolicyResult,
+    EntailmentVerdict,
+    EvaluatorCalibration,
+)
 from .evidence import (
     CitationFetchResult,
     CitationVerifier,
@@ -15,11 +23,17 @@ from .evidence import (
 )
 
 __all__ = [
-    "Claim",
-    "ClaimImportance",
     "CitationFetchResult",
     "CitationVerifier",
+    "Claim",
+    "ClaimImportance",
     "CommandVerifier",
+    "EntailmentAssessment",
+    "EntailmentClaimResult",
+    "EntailmentPolicy",
+    "EntailmentPolicyResult",
+    "EntailmentVerdict",
+    "EvaluatorCalibration",
     "EvidenceArtifact",
     "EvidenceBundle",
     "EvidenceGate",

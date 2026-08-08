@@ -116,6 +116,8 @@ Use `model-council-quality` only when the extra calls have a clear quality role.
 
 The programmatic Evidence Layer is opt-in. Do not claim a normal CLI Council run passed an Evidence Gate unless a trusted external verifier actually produced the artifacts and its verifier ID was explicitly allowed by the gate policy.
 
+Claim–citation entailment judgments are advisory by default. Do not enable or claim a hard entailment gate unless the evaluator is explicitly trusted and its golden-set calibration meets the configured sample-count, correlation, and severe-false-accept thresholds.
+
 ## Privacy Rules
 
 - Never place credentials in prompts, logs, project files, or summaries.

@@ -266,6 +266,34 @@ class EvidenceGateTests(unittest.TestCase):
                 "e", "c", "https://docs.example/policy", expected_excerpt="policy"
             )
 
+    def test_citation_verifier_does_not_accept_redirect_binary_or_oversized_response(self):
+        def fetch_by_status(url, timeout, max_bytes):
+            if url.endswith("/redirect"):
+                return CitationFetchResult(302, "text/html", "redirect")
+            if url.endswith("/binary"):
+                return CitationFetchResult(200, "application/pdf", "policy")
+            raise ValueError("citation response exceeds byte limit")
+
+        verifier = CitationVerifier(
+            allowed_hosts=("docs.example",),
+            fetch=fetch_by_status,
+            resolver=lambda host, port: ("93.184.216.34",),
+        )
+
+        redirect = verifier.verify(
+            "redirect", "claim", "https://docs.example/redirect", expected_excerpt="redirect"
+        )
+        binary = verifier.verify(
+            "binary", "claim", "https://docs.example/binary", expected_excerpt="policy"
+        )
+        oversized = verifier.verify(
+            "oversized", "claim", "https://docs.example/oversized", expected_excerpt="policy"
+        )
+
+        self.assertEqual(redirect.status, EvidenceStatus.UNAVAILABLE)
+        self.assertEqual(binary.status, EvidenceStatus.FAILED)
+        self.assertEqual(oversized.status, EvidenceStatus.UNAVAILABLE)
+
 
 if __name__ == "__main__":
     unittest.main()
