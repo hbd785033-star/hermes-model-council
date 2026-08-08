@@ -22,6 +22,7 @@ from .performance import build_performance_report
 from .presets import build_native_moa_config
 from .recommender import Plan, recommend_plans
 from .runner import CouncilResult, CouncilRunner
+from .shadow_router import build_shadow_router_report
 from .telemetry import FeedbackKind, OutcomeKind, TelemetryInvoker, TelemetryStore
 
 
@@ -450,6 +451,15 @@ def build_parser() -> argparse.ArgumentParser:
     performance.add_argument("--minimum-samples", type=int, default=30)
     performance.add_argument("--telemetry-path", type=Path, default=None)
     performance.add_argument("--json", action="store_true")
+
+    shadow = sub.add_parser(
+        "shadow-router-report", help="Build an advisory-only shadow routing report"
+    )
+    shadow.add_argument("--task-kind", required=True)
+    shadow.add_argument("--baseline-plan", default="fast")
+    shadow.add_argument("--minimum-samples", type=int, default=30)
+    shadow.add_argument("--telemetry-path", type=Path, default=None)
+    shadow.add_argument("--json", action="store_true")
     return parser
 
 
@@ -639,6 +649,35 @@ def main(argv: list[str] | None = None) -> int:
                     f"latency_regret_ms={plan_metrics.latency_regret_ms}"
                 )
             for warning in report.warnings:
+                print(f"warning: {warning}", file=sys.stderr)
+        return 0
+
+    if args.command == "shadow-router-report":
+        store = TelemetryStore.open_read_only(args.telemetry_path or _telemetry_path())
+        performance = build_performance_report(
+            store.summarize_runs(task_kind=args.task_kind),
+            task_kind=args.task_kind,
+            baseline_plan=args.baseline_plan,
+            minimum_samples=args.minimum_samples,
+        )
+        shadow_report = build_shadow_router_report(performance)
+        payload = shadow_report.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(
+                f"Shadow router report: task={shadow_report.task_kind}, "
+                f"ready={shadow_report.ready}, "
+                "apply_automatically=false"
+            )
+            for proposal in shadow_report.proposals:
+                print(
+                    f"- candidate={proposal.candidate_plan}, "
+                    f"baseline={proposal.baseline_plan}, "
+                    f"score_delta={proposal.score_delta}, "
+                    f"latency_delta_ms={proposal.latency_delta_ms}"
+                )
+            for warning in shadow_report.warnings:
                 print(f"warning: {warning}", file=sys.stderr)
         return 0
 

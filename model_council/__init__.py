@@ -22,6 +22,11 @@ from .evidence import (
     EvidenceStatus,
 )
 from .performance import PerformanceReport, PlanPerformance, build_performance_report
+from .shadow_router import (
+    ShadowRouteProposal,
+    ShadowRouterReport,
+    build_shadow_router_report,
+)
 from .telemetry import (
     FeedbackKind,
     OutcomeEvent,
@@ -56,9 +61,12 @@ __all__ = [
     "PerformanceReport",
     "PlanPerformance",
     "RunPerformanceSummary",
+    "ShadowRouteProposal",
+    "ShadowRouterReport",
     "TaskProfile",
     "TelemetryInvoker",
     "TelemetryStore",
     "analyze_task",
     "build_performance_report",
+    "build_shadow_router_report",
 ]

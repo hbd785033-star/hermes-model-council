@@ -115,6 +115,19 @@ python -m model_council performance-report \
 
 报告按 plan 展示已知 outcome 数、成功率与 Wilson 95% 区间、正反馈率、外部 Eval 均分、延迟/调用/已知 Token 均值，并分别计算 success、score 和 latency regret。未知 outcome 不进入成功率分母；低于最小样本量的 plan 不计算 regret。报告不生成单一综合分或 `recommended_plan`，也不会写数据库或修改 Router。
 
+生成保守的 shadow routing 候选：
+
+```bash
+python -m model_council shadow-router-report \
+  --task-kind security_review \
+  --baseline-plan fast \
+  --minimum-samples 30 \
+  --telemetry-path "D:/ModelCouncilData/outcomes.db" \
+  --json
+```
+
+候选 plan 的成功率 Wilson 下界必须高于 baseline 上界，且外部 Eval 均分不能退步；置信区间重叠、score 缺失/下降或样本不足时只输出 warning。每个 proposal 都包含样本量、区间、score/latency delta 和回滚条件，并固定 `apply_automatically=false`；命令使用 SQLite 只读模式，不生成 Router 配置或权重补丁。
+
 ## 安装
 
 项目默认位于：

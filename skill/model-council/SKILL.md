@@ -124,6 +124,8 @@ Final task outcomes are externally assessed and immutable. Use `record-outcome` 
 
 Performance reports are offline and non-routing. Require a visible minimum sample threshold, preserve unknown outcomes, show Wilson intervals and metric-specific regret, and never collapse quality, latency, and cost into an unexplained composite winner or automatic Router update.
 
+Shadow router proposals are advisory only. Require non-overlapping success intervals and non-regressing external scores, disclose latency trade-offs and rollback conditions, keep `apply_automatically=false`, and never emit or apply a config patch from the report command.
+
 ## Privacy Rules
 
 - Never place credentials in prompts, logs, project files, or summaries.

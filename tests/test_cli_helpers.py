@@ -54,6 +54,15 @@ class CliHelperTests(unittest.TestCase):
         self.assertEqual(args.minimum_samples, 40)
         self.assertTrue(args.json)
 
+    def test_shadow_router_report_parser_is_advisory_only(self):
+        args = build_parser().parse_args(
+            ["shadow-router-report", "--task-kind", "security_review",
+             "--baseline-plan", "fast", "--minimum-samples", "50", "--json"]
+        )
+        self.assertEqual(args.task_kind, "security_review")
+        self.assertEqual(args.baseline_plan, "fast")
+        self.assertEqual(args.minimum_samples, 50)
+
     def test_telemetry_path_uses_explicit_environment_directory(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {"MODEL_COUNCIL_TELEMETRY_DIR": directory}
