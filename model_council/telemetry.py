@@ -119,6 +119,22 @@ class PerformanceSummary:
     mean_total_tokens: float | None
 
 
+@dataclass(frozen=True)
+class RunPerformanceSummary:
+    task_kind: str
+    plan_id: str
+    sample_count: int
+    successes: int
+    failures: int
+    unknown_outcomes: int
+    positive_feedback: int
+    negative_feedback: int
+    mean_score: float | None
+    mean_latency_ms: float | None
+    mean_execution_calls: float | None
+    mean_total_tokens: float | None
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
@@ -288,6 +304,101 @@ class TelemetryStore:
         finally:
             connection.close()
 
+    def record_run_outcome(
+        self,
+        *,
+        event_id: str,
+        task_profile: TaskProfile,
+        plan_id: str,
+        outcome: OutcomeKind,
+        evaluator_score: float | None,
+        feedback: FeedbackKind,
+        latency_ms: int,
+        execution_calls: int,
+        failure_code: str | None = None,
+        total_tokens: int | None = None,
+        policy_version: str = "telemetry-v2",
+        now: datetime | None = None,
+    ) -> None:
+        current = now or datetime.now(timezone.utc)
+        self.record(
+            OutcomeEvent(
+                event_id=event_id,
+                occurred_at=current.isoformat(),
+                task_kind=task_profile.kind,
+                complexity=task_profile.complexity,
+                risk=task_profile.risk,
+                plan_id=plan_id,
+                role="run",
+                provider="council",
+                model="council",
+                family="council",
+                outcome=outcome,
+                evaluator_score=evaluator_score,
+                latency_ms=latency_ms,
+                execution_calls=execution_calls,
+                total_tokens=total_tokens,
+                failure_code=failure_code,
+                feedback=feedback,
+                policy_version=policy_version,
+            ),
+            now=current,
+        )
+
+    def record_outcome_for_run(
+        self,
+        *,
+        run_id: str,
+        outcome: OutcomeKind,
+        evaluator_score: float | None,
+        feedback: FeedbackKind,
+        failure_code: str | None = None,
+        total_tokens: int | None = None,
+        policy_version: str = "telemetry-v2",
+        now: datetime | None = None,
+    ) -> str:
+        if not _SAFE_ID.fullmatch(run_id) or len(run_id) > 56:
+            raise ValueError("run_id must be a safe identifier of at most 56 characters")
+        event_id = f"{run_id}:outcome"
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """SELECT task_kind, complexity, risk, plan_id,
+                          COUNT(*), SUM(latency_ms), SUM(execution_calls)
+                     FROM outcome_events
+                    WHERE substr(event_id, 1, ?) = ? AND role != 'run'
+                    GROUP BY task_kind, complexity, risk, plan_id""",
+                (len(run_id) + 1, f"{run_id}:"),
+            ).fetchall()
+            if not rows:
+                raise ValueError(f"no telemetry calls found for run_id: {run_id}")
+            if len(rows) != 1:
+                raise ValueError(f"telemetry run has inconsistent metadata: {run_id}")
+            existing = connection.execute(
+                "SELECT 1 FROM outcome_events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            if existing:
+                raise ValueError(f"run outcome already recorded: {run_id}")
+            task_kind, complexity, risk, plan_id, calls, latency, _ = rows[0]
+        finally:
+            connection.close()
+        profile = TaskProfile(str(task_kind), int(complexity), int(risk), False, False, False)
+        self.record_run_outcome(
+            event_id=event_id,
+            task_profile=profile,
+            plan_id=str(plan_id),
+            outcome=outcome,
+            evaluator_score=evaluator_score,
+            feedback=feedback,
+            latency_ms=int(latency or 0),
+            execution_calls=int(calls or 0),
+            failure_code=failure_code,
+            total_tokens=total_tokens,
+            policy_version=policy_version,
+            now=now,
+        )
+        return event_id
+
     def count_events(self) -> int:
         connection = self._connect()
         try:
@@ -329,6 +440,35 @@ class TelemetryStore:
                     (task_kind,),
                 ).fetchall()
             return tuple(PerformanceSummary(*row) for row in rows)
+        finally:
+            connection.close()
+
+    def summarize_runs(
+        self, *, task_kind: str | None = None
+    ) -> tuple[RunPerformanceSummary, ...]:
+        connection = self._connect()
+        try:
+            where = "WHERE role = 'run'"
+            parameters: tuple[str, ...] = ()
+            if task_kind is not None:
+                where += " AND task_kind = ?"
+                parameters = (task_kind,)
+            rows = connection.execute(
+                f"""SELECT task_kind, plan_id, COUNT(*),
+                           SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN outcome = 'failure' THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN outcome = 'unknown' THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN feedback = 'positive' THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN feedback = 'negative' THEN 1 ELSE 0 END),
+                           AVG(evaluator_score), AVG(latency_ms),
+                           AVG(execution_calls), AVG(total_tokens)
+                      FROM outcome_events
+                      {where}
+                     GROUP BY task_kind, plan_id
+                     ORDER BY task_kind, plan_id""",
+                parameters,
+            ).fetchall()
+            return tuple(RunPerformanceSummary(*row) for row in rows)
         finally:
             connection.close()
 

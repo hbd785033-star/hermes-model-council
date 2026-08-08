@@ -120,6 +120,8 @@ Claim–citation entailment judgments are advisory by default. Do not enable or 
 
 Telemetry is opt-in and prompt-free. The CLI requires `--telemetry` (optionally with `--telemetry-path`); merely supplying a path must not create a database. It may record task features, model/role metadata, outcome codes, evaluator scores, latency, calls, token counts, and enum feedback, but it must not store raw prompts or outputs; unknown token counts stay unknown/NULL rather than zero, and telemetry summaries are evidence for offline evaluation, not an automatic Router weight update.
 
+Final task outcomes are externally assessed and immutable. Use `record-outcome` with the emitted `telemetry_run_id`; never infer task success from a successful API call or let the Chairman overwrite the outcome. Run-level performance summaries must filter `role=run` so call availability cannot masquerade as answer correctness.
+
 ## Privacy Rules
 
 - Never place credentials in prompts, logs, project files, or summaries.

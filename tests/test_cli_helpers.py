@@ -33,6 +33,17 @@ class CliHelperTests(unittest.TestCase):
         self.assertTrue(opt_in_args.telemetry)
         self.assertEqual(opt_in_args.telemetry_path, Path("D:/events.db"))
 
+    def test_record_outcome_parser_requires_run_id_and_validates_choices(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ["record-outcome", "--run-id", "run-1", "--outcome", "success", "--feedback", "positive"]
+        )
+        self.assertEqual(args.run_id, "run-1")
+        self.assertEqual(args.outcome, "success")
+        self.assertEqual(args.feedback, "positive")
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["record-outcome", "--run-id", "run-1", "--outcome", "maybe"])
+
     def test_telemetry_path_uses_explicit_environment_directory(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {"MODEL_COUNCIL_TELEMETRY_DIR": directory}

@@ -26,6 +26,7 @@ from .telemetry import (
     OutcomeEvent,
     OutcomeKind,
     PerformanceSummary,
+    RunPerformanceSummary,
     TelemetryInvoker,
     TelemetryStore,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "OutcomeEvent",
     "OutcomeKind",
     "PerformanceSummary",
+    "RunPerformanceSummary",
     "TaskProfile",
     "TelemetryInvoker",
     "TelemetryStore",

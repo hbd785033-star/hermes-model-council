@@ -148,6 +148,107 @@ class TelemetryStoreTests(unittest.TestCase):
         self.assertEqual(summary[0].mean_execution_calls, 3.0)
         self.assertEqual(summary[0].mean_total_tokens, 800.0)
 
+    def test_records_and_summarizes_final_run_outcomes_separately_from_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TelemetryStore(Path(directory) / "telemetry.db")
+            profile = TaskProfile("security_review", 4, 5, False, False, True)
+            store.record(self._event())
+            store.record_run_outcome(
+                event_id="run-outcome-1",
+                task_profile=profile,
+                plan_id="quality",
+                outcome=OutcomeKind.SUCCESS,
+                evaluator_score=0.88,
+                feedback=FeedbackKind.POSITIVE,
+                latency_ms=4500,
+                execution_calls=5,
+            )
+            store.record_run_outcome(
+                event_id="run-outcome-2",
+                task_profile=profile,
+                plan_id="fast",
+                outcome=OutcomeKind.FAILURE,
+                evaluator_score=0.3,
+                feedback=FeedbackKind.NEGATIVE,
+                latency_ms=900,
+                execution_calls=1,
+                failure_code="wrong_answer",
+            )
+            runs = store.summarize_runs(task_kind="security_review")
+
+        self.assertEqual(len(runs), 2)
+        quality = next(item for item in runs if item.plan_id == "quality")
+        self.assertEqual(quality.sample_count, 1)
+        self.assertEqual(quality.successes, 1)
+        self.assertEqual(quality.mean_score, 0.88)
+        self.assertEqual(quality.positive_feedback, 1)
+        self.assertEqual(quality.mean_execution_calls, 5.0)
+
+    def test_records_final_outcome_from_existing_run_call_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TelemetryStore(Path(directory) / "telemetry.db")
+            profile = TaskProfile("decision", 3, 4, False, False, True)
+            wrapped = TelemetryInvoker(
+                invoke=lambda model, prompt, role, effort: "ok",
+                store=store,
+                task_profile=profile,
+                plan_id="quality",
+                run_id="linked-run",
+            )
+            model = ModelSpec("provider", "model", "family")
+            wrapped(model, "prompt", "advisor-1", "high")
+            wrapped(model, "prompt", "chairman", "high")
+
+            event_id = store.record_outcome_for_run(
+                run_id="linked-run",
+                outcome=OutcomeKind.SUCCESS,
+                evaluator_score=0.92,
+                feedback=FeedbackKind.POSITIVE,
+            )
+            runs = store.summarize_runs()
+
+        self.assertEqual(event_id, "linked-run:outcome")
+        self.assertEqual(runs[0].plan_id, "quality")
+        self.assertEqual(runs[0].sample_count, 1)
+        self.assertEqual(runs[0].successes, 1)
+        self.assertEqual(runs[0].mean_execution_calls, 2.0)
+
+    def test_run_outcome_requires_existing_calls_and_is_immutable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TelemetryStore(Path(directory) / "telemetry.db")
+            with self.assertRaisesRegex(ValueError, "no telemetry calls"):
+                store.record_outcome_for_run(
+                    run_id="missing-run",
+                    outcome=OutcomeKind.FAILURE,
+                    evaluator_score=None,
+                    feedback=FeedbackKind.NEGATIVE,
+                )
+
+    def test_run_id_underscore_is_not_treated_as_sql_wildcard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TelemetryStore(Path(directory) / "telemetry.db")
+            model = ModelSpec("provider", "model", "family")
+            for run_id, plan_id in (("run_1", "quality"), ("runA1", "fast")):
+                TelemetryInvoker(
+                    invoke=lambda *args: "ok",
+                    store=store,
+                    task_profile=TaskProfile("decision", 3, 4, False, False, True),
+                    plan_id=plan_id,
+                    run_id=run_id,
+                )(model, "prompt", "actor", "low")
+
+            store.record_outcome_for_run(
+                run_id="run_1",
+                outcome=OutcomeKind.SUCCESS,
+                evaluator_score=0.8,
+                feedback=FeedbackKind.POSITIVE,
+            )
+            runs = store.summarize_runs()
+
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].plan_id, "quality")
+
+
     def test_retention_purges_old_events_and_keeps_recent_events(self):
         with tempfile.TemporaryDirectory() as directory:
             store = TelemetryStore(Path(directory) / "telemetry.db", retention_days=30)

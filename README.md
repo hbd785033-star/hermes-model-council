@@ -89,6 +89,19 @@ python -m model_council run "任务" --plan quality --yes --telemetry --telemetr
 
 `TelemetryInvoker` 为每次 Advisor/Reviewer/Aggregator/Chairman 调用记录一条事件；原 Prompt、模型输出和异常正文不会进入数据库。Hermes CLI 没有暴露单次调用 Token 数时存为 SQL `NULL`，不伪造为 0。Telemetry 初始化或写入失败采用 best-effort 降级，不改变原模型调用的返回值、异常或 Council fallback；`--telemetry-path` 只有与 `--telemetry` 同时使用才会创建数据库。
 
+执行成功后，输出会包含 `telemetry_run_id`。最终任务绩效必须由用户、外部 Eval 或回放系统另行提交，不能由 Chairman 自动宣布：
+
+```bash
+python -m model_council record-outcome \
+  --run-id "run-20260808T120000000000Z" \
+  --outcome success \
+  --evaluator-score 0.9 \
+  --feedback positive \
+  --telemetry-path "D:/ModelCouncilData/outcomes.db"
+```
+
+`record-outcome` 从该 run 的 per-call 事件反查任务类型、复杂度/风险、plan、累计调用数和延迟，然后写入独立 `role=run` 事件。相同 run ID 的最终 outcome 不可覆盖；`summarize_runs()` 只聚合 `role=run`，不会把“模型 API 调用成功”误当成“任务答案正确”。
+
 ## 安装
 
 项目默认位于：

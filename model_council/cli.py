@@ -21,7 +21,7 @@ from .inventory import ModelSpec, discover_models
 from .presets import build_native_moa_config
 from .recommender import Plan, recommend_plans
 from .runner import CouncilResult, CouncilRunner
-from .telemetry import TelemetryInvoker, TelemetryStore
+from .telemetry import FeedbackKind, OutcomeKind, TelemetryInvoker, TelemetryStore
 
 
 def _health_cache_path() -> Path:
@@ -427,6 +427,19 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--timeout", type=int, default=180)
     install.add_argument("--yes", action="store_true", help="Confirm config backup and write")
     install.add_argument("--json", action="store_true")
+
+    record_outcome = sub.add_parser(
+        "record-outcome", help="Record an externally assessed final run outcome"
+    )
+    record_outcome.add_argument("--run-id", required=True)
+    record_outcome.add_argument("--outcome", choices=tuple(item.value for item in OutcomeKind), required=True)
+    record_outcome.add_argument("--evaluator-score", type=float, default=None)
+    record_outcome.add_argument(
+        "--feedback", choices=tuple(item.value for item in FeedbackKind), default="none"
+    )
+    record_outcome.add_argument("--failure-code", default=None)
+    record_outcome.add_argument("--telemetry-path", type=Path, default=None)
+    record_outcome.add_argument("--json", action="store_true")
     return parser
 
 
@@ -480,10 +493,14 @@ def main(argv: list[str] | None = None) -> int:
         plan = next(plan for plan in plans if plan.id == args.plan)
         base_invoker = HermesInvoker(timeout=args.timeout)
         invoker: Callable[[ModelSpec, str, str, str], str] = base_invoker
+        telemetry_run_id: str | None = None
+        telemetry_db_path: Path | None = None
         if args.telemetry:
             try:
-                telemetry_store = TelemetryStore(args.telemetry_path or _telemetry_path())
+                telemetry_db_path = args.telemetry_path or _telemetry_path()
+                telemetry_store = TelemetryStore(telemetry_db_path)
                 run_id = datetime.now(UTC).strftime("run-%Y%m%dT%H%M%S%fZ")
+                telemetry_run_id = run_id
                 invoker = TelemetryInvoker(
                     invoke=base_invoker,
                     store=telemetry_store,
@@ -492,6 +509,8 @@ def main(argv: list[str] | None = None) -> int:
                     run_id=run_id,
                 )
             except Exception as exc:  # noqa: BLE001 - optional telemetry boundary
+                telemetry_run_id = None
+                telemetry_db_path = None
                 print(f"Telemetry disabled: {type(exc).__name__}", file=sys.stderr)
                 invoker = base_invoker
         else:
@@ -503,6 +522,9 @@ def main(argv: list[str] | None = None) -> int:
             probe_call_count=probe_call_count,
             probe_cache_hit_count=probe_cache_hit_count,
         )
+        if telemetry_run_id is not None:
+            payload["telemetry_run_id"] = telemetry_run_id
+            payload["telemetry_path"] = str(telemetry_db_path)
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
@@ -520,6 +542,11 @@ def main(argv: list[str] | None = None) -> int:
                 print("\nDegraded participants:", file=sys.stderr)
                 for failure in result.failures:
                     print(f"- {failure}", file=sys.stderr)
+            if telemetry_run_id is not None:
+                print(
+                    f"\n[telemetry run_id={telemetry_run_id} path={telemetry_db_path}]",
+                    file=sys.stderr,
+                )
             print(
                 "\n[model-council calls: "
                 f"probe={probe_call_count}, execution={result.call_count}, "
@@ -560,6 +587,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Installed native Hermes MoA presets. Backup: {backup}")
             print(f"Default preset: {payload['default_preset']}")
             print("Presets: " + ", ".join(str(name) for name in preset_names))
+        return 0
+
+    if args.command == "record-outcome":
+        store = TelemetryStore(args.telemetry_path or _telemetry_path())
+        event_id = store.record_outcome_for_run(
+            run_id=args.run_id,
+            outcome=OutcomeKind(args.outcome),
+            evaluator_score=args.evaluator_score,
+            feedback=FeedbackKind(args.feedback),
+            failure_code=args.failure_code,
+        )
+        payload = {"event_id": event_id, "run_id": args.run_id, "recorded": True}
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"Recorded final outcome for {args.run_id}: {event_id}")
         return 0
 
     return 2
