@@ -21,6 +21,13 @@ from .evidence import (
     EvidenceGateResult,
     EvidenceStatus,
 )
+from .telemetry import (
+    FeedbackKind,
+    OutcomeEvent,
+    OutcomeKind,
+    PerformanceSummary,
+    TelemetryStore,
+)
 
 __all__ = [
     "CitationFetchResult",
@@ -39,6 +46,11 @@ __all__ = [
     "EvidenceGate",
     "EvidenceGateResult",
     "EvidenceStatus",
+    "FeedbackKind",
+    "OutcomeEvent",
+    "OutcomeKind",
+    "PerformanceSummary",
     "TaskProfile",
+    "TelemetryStore",
     "analyze_task",
 ]

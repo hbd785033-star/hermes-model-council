@@ -57,6 +57,29 @@ verdict = EvidenceGate(trusted_verifiers=(artifact.verifier,)).evaluate(
 
 `EntailmentPolicy` 汇总受信 evaluator 对 Claim–Citation 关系的 `supported`、`contradicted` 或 `insufficient` 判断。不同 evaluator 同时给出支持和反驳时，结果降为 `insufficient` 并标记 disagreement；模型自评和未加入 allowlist 的 assessment 被忽略。该策略默认只 advisory；即使请求 hard gate，也必须先满足校准样本数、Pearson 相关性和严重误放行率阈值。默认阈值为至少 100 个 golden samples、Pearson ≥ 0.7、严重误放行率 ≤ 5%。
 
+## Outcome / Telemetry Store（程序化接口）
+
+`TelemetryStore` 使用本地 SQLite 保存按事件划分的任务画像和结果元数据，为离线 Evals 与未来 Router 提供聚合数据。schema 只包含事件 ID、UTC 时间、任务类型、复杂度/风险、计划/角色、Provider/模型/家族、结果、验证分数、延迟、调用量、Token 数、安全失败码、枚举式用户反馈和策略版本；不包含原始 Prompt、模型输出、凭据或完整工具轨迹。
+
+```python
+from pathlib import Path
+from model_council import FeedbackKind, OutcomeEvent, OutcomeKind, TelemetryStore
+
+store = TelemetryStore(Path("D:/Projects/hermes-model-council-data/telemetry.db"))
+store.record(OutcomeEvent(
+    event_id="run-001", occurred_at="2026-08-08T12:00:00+00:00",
+    task_kind="security_review", complexity=4, risk=5,
+    plan_id="quality", role="advisor", provider="provider-a",
+    model="model-a", family="family-a", outcome=OutcomeKind.SUCCESS,
+    evaluator_score=0.9, latency_ms=1200, execution_calls=3,
+    total_tokens=800, failure_code=None, feedback=FeedbackKind.POSITIVE,
+    policy_version="router-v1",
+))
+summary = store.summarize(task_kind="security_review")
+```
+
+标识字段只允许受限 identifier 字符，避免把自由文本伪装成 `task_kind` 等字段写入；反馈只允许 `positive/negative/none`。默认保留 90 天，过期事件在同一次写入事务中清理或拒绝落盘。每个 SQLite 操作显式关闭连接，兼容 Windows 临时目录与文件锁语义，并提供 `integrity_check()`。当前 Store 不会自动修改 Router 权重。
+
 ## 安装
 
 项目默认位于：

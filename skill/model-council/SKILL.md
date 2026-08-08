@@ -118,6 +118,8 @@ The programmatic Evidence Layer is opt-in. Do not claim a normal CLI Council run
 
 Claim–citation entailment judgments are advisory by default. Do not enable or claim a hard entailment gate unless the evaluator is explicitly trusted and its golden-set calibration meets the configured sample-count, correlation, and severe-false-accept thresholds.
 
+Telemetry is opt-in and prompt-free. It may record task features, model/role metadata, outcome codes, evaluator scores, latency, calls, token counts, and enum feedback, but it must not store raw prompts or outputs; telemetry summaries are evidence for offline evaluation, not an automatic Router weight update.
+
 ## Privacy Rules
 
 - Never place credentials in prompts, logs, project files, or summaries.
