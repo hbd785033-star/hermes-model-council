@@ -5,6 +5,8 @@ from pathlib import Path
 
 from model_council import EvidenceGate as PublicEvidenceGate
 from model_council.evidence import (
+    CitationFetchResult,
+    CitationVerifier,
     Claim,
     ClaimImportance,
     CommandVerifier,
@@ -183,6 +185,86 @@ class EvidenceGateTests(unittest.TestCase):
                 verifier.verify("e", "c", (str(spoofed), "--version"))
             with self.assertRaisesRegex(ValueError, "outside verifier root"):
                 verifier.verify("e", "c", (sys.executable, "-V"), cwd="..")
+
+    def test_citation_verifier_requires_public_allowed_https_source_and_quote(self):
+        fetched_urls = []
+
+        def fetch(url, timeout, max_bytes):
+            fetched_urls.append((url, timeout, max_bytes))
+            return CitationFetchResult(
+                status_code=200,
+                content_type="text/html",
+                text="The official policy requires signed requests.",
+            )
+
+        verifier = CitationVerifier(
+            allowed_hosts=("docs.example",),
+            fetch=fetch,
+            resolver=lambda host, port: ("93.184.216.34",),
+        )
+        artifact = verifier.verify(
+            "policy-source",
+            "signed-requests",
+            "https://docs.example/security/policy",
+            expected_excerpt="official policy requires signed requests",
+        )
+        bundle = EvidenceBundle(
+            claims=(
+                Claim(
+                    "signed-requests",
+                    "Requests are signed",
+                    ClaimImportance.REQUIRED,
+                ),
+            ),
+            artifacts=(artifact,),
+        )
+
+        self.assertEqual(artifact.status, EvidenceStatus.VERIFIED)
+        self.assertEqual(fetched_urls[0][0], "https://docs.example/security/policy")
+        self.assertTrue(
+            EvidenceGate(trusted_verifiers=(artifact.verifier,)).evaluate(bundle).passed
+        )
+
+    def test_citation_verifier_marks_missing_quote_as_failed_evidence(self):
+        verifier = CitationVerifier(
+            allowed_hosts=("docs.example",),
+            fetch=lambda url, timeout, max_bytes: CitationFetchResult(
+                status_code=200,
+                content_type="text/plain",
+                text="This page discusses a different subject.",
+            ),
+            resolver=lambda host, port: ("93.184.216.34",),
+        )
+
+        artifact = verifier.verify(
+            "policy-source",
+            "signed-requests",
+            "https://docs.example/security/policy",
+            expected_excerpt="requests are signed",
+        )
+
+        self.assertEqual(artifact.status, EvidenceStatus.FAILED)
+
+    def test_citation_verifier_rejects_untrusted_scheme_host_and_private_dns(self):
+        verifier = CitationVerifier(
+            allowed_hosts=("docs.example",),
+            fetch=lambda url, timeout, max_bytes: self.fail("fetch must not run"),
+            resolver=lambda host, port: ("93.184.216.34",),
+        )
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            verifier.verify("e", "c", "http://docs.example/policy", expected_excerpt="policy")
+        with self.assertRaisesRegex(ValueError, "not allowed"):
+            verifier.verify("e", "c", "https://evil.example/policy", expected_excerpt="policy")
+
+        private_dns = CitationVerifier(
+            allowed_hosts=("docs.example",),
+            fetch=lambda url, timeout, max_bytes: self.fail("fetch must not run"),
+            resolver=lambda host, port: ("127.0.0.1",),
+        )
+        with self.assertRaisesRegex(ValueError, "public"):
+            private_dns.verify(
+                "e", "c", "https://docs.example/policy", expected_excerpt="policy"
+            )
 
 
 if __name__ == "__main__":

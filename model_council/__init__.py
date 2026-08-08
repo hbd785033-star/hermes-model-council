@@ -2,6 +2,8 @@
 
 from .analysis import TaskProfile, analyze_task
 from .evidence import (
+    CitationFetchResult,
+    CitationVerifier,
     Claim,
     ClaimImportance,
     CommandVerifier,
@@ -15,6 +17,8 @@ from .evidence import (
 __all__ = [
     "Claim",
     "ClaimImportance",
+    "CitationFetchResult",
+    "CitationVerifier",
     "CommandVerifier",
     "EvidenceArtifact",
     "EvidenceBundle",

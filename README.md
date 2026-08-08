@@ -53,6 +53,8 @@ verdict = EvidenceGate(trusted_verifiers=(artifact.verifier,)).evaluate(
 
 `EvidenceGate` 默认不信任任何 verifier；只有调用方明确加入 `trusted_verifiers` 的外部验证器才能满足关键声明，模型自报的 `verified` 状态会被忽略并出现在 `untrusted_evidence_ids`。`CommandVerifier` 固定使用参数数组和 `shell=False`，限制工作目录必须位于配置的根目录内，并只允许预先配置的可执行文件；allowlist 名称会在初始化时解析为可信绝对路径，同名但路径不一致的可执行文件会被拒绝。它是执行边界，不是容器沙箱；命令必须来自可信应用配置，绝不能直接来自模型输出或用户任务正文。当前 CLI 尚不自动生成 Claim 或运行验证命令，避免在没有明确权限和任务成功标准时扩大工具权限。
 
+`CitationVerifier` 只验证调用方预先允许的 HTTPS host 上是否存在指定原文摘录。它拒绝 userinfo、query、fragment、IP 字面量、非 443 端口和解析到非公网地址的 host；默认抓取器禁用自动重定向，并限制响应大小和文本内容类型。它证明的是“该来源包含这段原文”，不是自动证明原文推导出的结论正确；引用蕴含关系仍应作为独立 Eval。
+
 ## 安装
 
 项目默认位于：

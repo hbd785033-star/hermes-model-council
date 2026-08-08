@@ -8,13 +8,18 @@ hard-gate decision deterministically.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import shutil
+import socket
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from .hermes_invoker import _redact
 
@@ -307,4 +312,160 @@ class CommandVerifier:
             excerpt=excerpt,
             status=status,
             verifier=f"command:{executable}",
+        )
+
+
+@dataclass(frozen=True)
+class CitationFetchResult:
+    status_code: int
+    content_type: str
+    text: str
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+def _resolve_public_addresses(host: str, port: int) -> tuple[str, ...]:
+    addresses = {
+        str(row[4][0])
+        for row in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    }
+    return tuple(sorted(addresses))
+
+
+def _fetch_citation(url: str, timeout: int, max_bytes: int) -> CitationFetchResult:
+    opener = urllib.request.build_opener(_NoRedirect())
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "hermes-model-council/0.1 citation-verifier"},
+        method="GET",
+    )
+    try:
+        response = opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        response = exc
+    with response:
+        payload = response.read(max_bytes + 1)
+        if len(payload) > max_bytes:
+            raise ValueError("citation response exceeds byte limit")
+        content_type = str(response.headers.get_content_type() or "")
+        charset = response.headers.get_content_charset() or "utf-8"
+        text = payload.decode(charset, errors="replace")
+        return CitationFetchResult(int(response.status), content_type, text)
+
+
+class CitationVerifier:
+    """Verify an exact quote on a caller-approved public HTTPS source."""
+
+    _TEXT_TYPES = {
+        "application/json",
+        "application/xml",
+        "application/xhtml+xml",
+    }
+
+    def __init__(
+        self,
+        *,
+        allowed_hosts: tuple[str, ...],
+        timeout: int = 20,
+        max_bytes: int = 262_144,
+        fetch: Callable[[str, int, int], CitationFetchResult] = _fetch_citation,
+        resolver: Callable[[str, int], tuple[str, ...]] = _resolve_public_addresses,
+    ) -> None:
+        self.allowed_hosts = {
+            str(host).strip().casefold()
+            for host in allowed_hosts
+            if str(host).strip()
+        }
+        if not self.allowed_hosts:
+            raise ValueError("at least one allowed citation host is required")
+        self.timeout = max(1, int(timeout))
+        self.max_bytes = max(1024, int(max_bytes))
+        self.fetch = fetch
+        self.resolver = resolver
+
+    @staticmethod
+    def _normalized(text: str) -> str:
+        return " ".join(str(text or "").casefold().split())
+
+    def _validate_url(self, url: str) -> tuple[str, str]:
+        parsed = urlsplit(str(url or "").strip())
+        if parsed.scheme.casefold() != "https":
+            raise ValueError("citation URL must use HTTPS")
+        if parsed.username or parsed.password:
+            raise ValueError("citation URL userinfo is not allowed")
+        if parsed.query or parsed.fragment:
+            raise ValueError("citation URL query and fragment are not allowed")
+        host = str(parsed.hostname or "").casefold()
+        if not host or host not in self.allowed_hosts:
+            raise ValueError(f"citation host is not allowed: {host or '[missing]'}")
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("citation host must not be an IP literal")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("citation URL has an invalid port") from exc
+        if port not in (None, 443):
+            raise ValueError("citation URL must use the default HTTPS port")
+        addresses = self.resolver(host, 443)
+        if not addresses:
+            raise ValueError("citation host did not resolve")
+        for address in addresses:
+            try:
+                parsed_address = ipaddress.ip_address(address)
+            except ValueError as exc:
+                raise ValueError("citation resolver returned an invalid address") from exc
+            if not parsed_address.is_global:
+                raise ValueError("citation host must resolve only to public addresses")
+        canonical = parsed.geturl()
+        return canonical, host
+
+    def verify(
+        self,
+        evidence_id: str,
+        claim_id: str,
+        url: str,
+        *,
+        expected_excerpt: str,
+    ) -> EvidenceArtifact:
+        expected = self._normalized(expected_excerpt)
+        if not expected:
+            raise ValueError("expected citation excerpt must not be empty")
+        if len(expected) > 2000:
+            raise ValueError("expected citation excerpt is too long")
+        canonical, host = self._validate_url(url)
+        try:
+            fetched = self.fetch(canonical, self.timeout, self.max_bytes)
+        except (OSError, TimeoutError, ValueError, urllib.error.URLError) as exc:
+            status = EvidenceStatus.UNAVAILABLE
+            excerpt = f"citation fetch unavailable: {type(exc).__name__}"
+        else:
+            content_type = fetched.content_type.casefold().split(";", 1)[0].strip()
+            is_text = content_type.startswith("text/") or content_type in self._TEXT_TYPES
+            if not 200 <= fetched.status_code < 300:
+                status = EvidenceStatus.UNAVAILABLE
+                excerpt = f"citation HTTP status={fetched.status_code}"
+            elif not is_text:
+                status = EvidenceStatus.FAILED
+                excerpt = "citation content type is not textual"
+            elif expected in self._normalized(fetched.text):
+                status = EvidenceStatus.VERIFIED
+                excerpt = "expected excerpt found in allowed citation"
+            else:
+                status = EvidenceStatus.FAILED
+                excerpt = "expected excerpt not found in allowed citation"
+        return EvidenceArtifact(
+            id=evidence_id,
+            claim_id=claim_id,
+            kind="citation",
+            source=canonical,
+            excerpt=excerpt,
+            status=status,
+            verifier=f"citation:{host}",
         )
