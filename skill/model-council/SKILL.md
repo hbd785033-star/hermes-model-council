@@ -114,6 +114,8 @@ Use `model-council-quality` only when the extra calls have a clear quality role.
 4. **Chairman** — state agreement, preserve meaningful disagreement, identify blind spots, make one recommendation, and give the first concrete action.
 5. **Disclosure** — return call count, failures, degraded paths, and limitations.
 
+The programmatic Evidence Layer is opt-in. Do not claim a normal CLI Council run passed an Evidence Gate unless a trusted external verifier actually produced the artifacts and its verifier ID was explicitly allowed by the gate policy.
+
 ## Privacy Rules
 
 - Never place credentials in prompts, logs, project files, or summaries.

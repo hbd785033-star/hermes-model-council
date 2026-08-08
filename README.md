@@ -21,6 +21,38 @@ Model Council 不替代 Hermes Provider、OAuth、安全、工具和会话体系
 
 自定义 Council 执行器的子调用默认禁用工具并隔离会话，用于独立推理和匿名评审。需要工具或当前会话上下文的任务应安装并使用 Hermes 原生 MoA Preset。
 
+## Evidence Layer（程序化接口）
+
+`model_council.evidence` 提供结构化 `Claim`、`EvidenceArtifact`、`EvidenceBundle` 和确定性的 `EvidenceGate`。门禁只判断外部验证器提交的状态，不让 LLM 自报 confidence 或“我已验证”直接通过关键声明。
+
+```python
+from pathlib import Path
+
+from model_council import (
+    Claim,
+    ClaimImportance,
+    CommandVerifier,
+    EvidenceBundle,
+    EvidenceGate,
+)
+
+claim = Claim("tests", "项目测试通过", ClaimImportance.REQUIRED)
+verifier = CommandVerifier(
+    root=Path("D:/Projects/example"),
+    allowed_executables=("python", "python.exe"),
+)
+artifact = verifier.verify(
+    "unit-tests",
+    claim.id,
+    ("python", "-m", "unittest", "discover", "-s", "tests"),
+)
+verdict = EvidenceGate(trusted_verifiers=(artifact.verifier,)).evaluate(
+    EvidenceBundle(claims=(claim,), artifacts=(artifact,))
+)
+```
+
+`EvidenceGate` 默认不信任任何 verifier；只有调用方明确加入 `trusted_verifiers` 的外部验证器才能满足关键声明，模型自报的 `verified` 状态会被忽略并出现在 `untrusted_evidence_ids`。`CommandVerifier` 固定使用参数数组和 `shell=False`，限制工作目录必须位于配置的根目录内，并只允许预先配置的可执行文件；allowlist 名称会在初始化时解析为可信绝对路径，同名但路径不一致的可执行文件会被拒绝。它是执行边界，不是容器沙箱；命令必须来自可信应用配置，绝不能直接来自模型输出或用户任务正文。当前 CLI 尚不自动生成 Claim 或运行验证命令，避免在没有明确权限和任务成功标准时扩大工具权限。
+
 ## 安装
 
 项目默认位于：
