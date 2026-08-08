@@ -1,3 +1,4 @@
+import re
 import unittest
 
 from model_council.inventory import ModelSpec
@@ -6,6 +7,88 @@ from model_council.runner import CouncilRunner, _failure_code
 
 
 class CouncilRunnerTests(unittest.TestCase):
+    def test_candidate_labels_are_stable_between_reviewers_and_chairman(self):
+        models = [
+            ModelSpec(f"provider-{index}", f"model-{index}", f"family-{index}")
+            for index in range(4)
+        ]
+        plan = Plan(
+            "quality",
+            "Quality",
+            "council",
+            (
+                Participant("advisor-1", models[0], "high"),
+                Participant("advisor-2", models[1], "high"),
+                Participant("advisor-3", models[2], "high"),
+                Participant("chairman", models[3], "high"),
+            ),
+            6,
+            9,
+            (),
+            (),
+        )
+        reviewer_prompts = []
+        chairman_prompts = []
+
+        def invoke(model, prompt, role, effort):
+            if role.startswith("advisor"):
+                return f"ANSWER_{model.model[-1]}"
+            if role.startswith("reviewer"):
+                reviewer_prompts.append(prompt)
+                return "review"
+            chairman_prompts.append(prompt)
+            return "final"
+
+        CouncilRunner(invoke=invoke, max_workers=1).run("task", plan, seed=7)
+
+        def response_mapping(prompt):
+            return dict(re.findall(r"Response ([A-Z]):\n(ANSWER_\d)", prompt))
+
+        self.assertEqual(len(chairman_prompts), 1)
+        chairman_mapping = response_mapping(chairman_prompts[0])
+        self.assertEqual(len(chairman_mapping), 3)
+        for reviewer_prompt in reviewer_prompts:
+            reviewer_mapping = response_mapping(reviewer_prompt)
+            self.assertTrue(reviewer_mapping)
+            for candidate_id, answer in reviewer_mapping.items():
+                self.assertEqual(chairman_mapping[candidate_id], answer)
+
+    def test_single_candidate_skips_empty_peer_review_and_discloses_degradation(self):
+        advisor = ModelSpec("provider-a", "model-a", "family-a")
+        chairman = ModelSpec("provider-b", "model-b", "family-b")
+        plan = Plan(
+            "quality",
+            "Quality",
+            "council",
+            (
+                Participant("advisor-1", advisor, "high"),
+                Participant("chairman", chairman, "high"),
+            ),
+            2,
+            9,
+            (),
+            (),
+        )
+        roles = []
+
+        def invoke(model, prompt, role, effort):
+            roles.append(role)
+            if role.startswith("advisor"):
+                return "ONLY_CANDIDATE"
+            if role.startswith("reviewer"):
+                self.fail("an empty peer-review call must not run")
+            return "FINAL"
+
+        result = CouncilRunner(invoke=invoke, max_workers=1).run("task", plan, seed=3)
+
+        self.assertEqual(roles, ["advisor-1", "chairman"])
+        self.assertEqual(result.call_count, 2)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.degradation_reason, "insufficient_candidates")
+        self.assertEqual(result.candidate_count, 1)
+        self.assertEqual(result.review_coverage, 0.0)
+        self.assertIsNone(result.fallback_source)
+
     def test_runs_anonymous_peer_review_then_chairman(self):
         openai = ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=True)
         claude = ModelSpec("anthropic", "claude-opus-4-6", "anthropic", healthy=True)
@@ -49,6 +132,11 @@ class CouncilRunnerTests(unittest.TestCase):
         self.assertTrue(all("claude-opus-4-6" not in prompt for prompt in review_prompts))
         self.assertEqual(result.call_count, 5)
         self.assertEqual(result.failures, ())
+        self.assertFalse(result.degraded)
+        self.assertIsNone(result.degradation_reason)
+        self.assertEqual(result.candidate_count, 2)
+        self.assertEqual(result.review_coverage, 1.0)
+        self.assertIsNone(result.fallback_source)
 
     def test_identity_scrubbing_is_case_insensitive(self):
         models = [
@@ -261,6 +349,7 @@ class CouncilRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.final, "FINAL")
         self.assertEqual(result.failures, ())
+        self.assertTrue(result.task_truncated)
 
     def test_bounded_block_never_exceeds_requested_limit(self):
         block = CouncilRunner._bounded_block(
@@ -306,6 +395,10 @@ class CouncilRunnerTests(unittest.TestCase):
         self.assertEqual(result.final, "ADVISOR FALLBACK")
         self.assertEqual(result.call_count, 2)
         self.assertTrue(any("aggregator" in failure for failure in result.failures))
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.degradation_reason, "aggregator_failed")
+        self.assertEqual(result.fallback_source, "advisor")
+        self.assertEqual(result.candidate_count, 1)
 
     def test_council_falls_back_to_anonymous_answer_when_chairman_fails(self):
         models = [
@@ -339,6 +432,9 @@ class CouncilRunnerTests(unittest.TestCase):
         self.assertTrue(result.final.startswith("Candidate "))
         self.assertEqual(result.call_count, 5)
         self.assertTrue(any("chairman" in failure for failure in result.failures))
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.degradation_reason, "chairman_failed")
+        self.assertIn(result.fallback_source, {"A", "B"})
         self.assertNotIn("gpt-5.6-sol", result.final.lower())
         self.assertNotIn("deepseek-v4-pro", result.final.lower())
 

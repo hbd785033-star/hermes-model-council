@@ -18,9 +18,12 @@ from .analysis import TaskProfile, analyze_task
 from .health import HealthCache, ProbeResult, probe_models
 from .hermes_invoker import HermesInvoker
 from .inventory import ModelSpec, discover_models
+from .performance import build_performance_report
 from .presets import build_native_moa_config
 from .recommender import Plan, recommend_plans
 from .runner import CouncilResult, CouncilRunner
+from .shadow_router import build_shadow_router_report
+from .telemetry import FeedbackKind, OutcomeKind, TelemetryInvoker, TelemetryStore
 
 
 def _health_cache_path() -> Path:
@@ -31,6 +34,13 @@ def _health_cache_path() -> Path:
         else Path.home() / ".cache" / "hermes-model-council"
     )
     return cache_dir / "health-cache.json"
+
+
+def _telemetry_path() -> Path:
+    configured_dir = os.environ.get("MODEL_COUNCIL_TELEMETRY_DIR")
+    if configured_dir:
+        return Path(configured_dir) / "outcomes.db"
+    return Path.home() / ".cache" / "hermes-model-council" / "outcomes.db"
 
 
 _HEALTH_CACHE_PATH = _health_cache_path()
@@ -280,6 +290,12 @@ def _result_payload(
         ],
         "reviews": list(result.reviews),
         "failures": list(result.failures),
+        "degraded": result.degraded,
+        "degradation_reason": result.degradation_reason,
+        "candidate_count": result.candidate_count,
+        "review_coverage": result.review_coverage,
+        "fallback_source": result.fallback_source,
+        "task_truncated": result.task_truncated,
         "call_count": result.call_count,
         "probe_call_count": probe_call_count,
         "probe_cache_hit_count": probe_cache_hit_count,
@@ -399,6 +415,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--refresh-probe", action="store_true", help="Ignore cached health results")
     run.add_argument("--timeout", type=int, default=240)
     run.add_argument("--yes", action="store_true", help="Confirm the displayed model-call budget")
+    run.add_argument("--telemetry", action="store_true", help="Opt in to prompt-free outcome telemetry")
+    run.add_argument("--telemetry-path", type=Path, default=None)
     run.add_argument("--json", action="store_true")
 
     install = sub.add_parser("install-presets", help="Install native Hermes MoA presets")
@@ -411,6 +429,37 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--timeout", type=int, default=180)
     install.add_argument("--yes", action="store_true", help="Confirm config backup and write")
     install.add_argument("--json", action="store_true")
+
+    record_outcome = sub.add_parser(
+        "record-outcome", help="Record an externally assessed final run outcome"
+    )
+    record_outcome.add_argument("--run-id", required=True)
+    record_outcome.add_argument("--outcome", choices=tuple(item.value for item in OutcomeKind), required=True)
+    record_outcome.add_argument("--evaluator-score", type=float, default=None)
+    record_outcome.add_argument(
+        "--feedback", choices=tuple(item.value for item in FeedbackKind), default="none"
+    )
+    record_outcome.add_argument("--failure-code", default=None)
+    record_outcome.add_argument("--telemetry-path", type=Path, default=None)
+    record_outcome.add_argument("--json", action="store_true")
+
+    performance = sub.add_parser(
+        "performance-report", help="Build a read-only offline plan performance report"
+    )
+    performance.add_argument("--task-kind", required=True)
+    performance.add_argument("--baseline-plan", default="fast")
+    performance.add_argument("--minimum-samples", type=int, default=30)
+    performance.add_argument("--telemetry-path", type=Path, default=None)
+    performance.add_argument("--json", action="store_true")
+
+    shadow = sub.add_parser(
+        "shadow-router-report", help="Build an advisory-only shadow routing report"
+    )
+    shadow.add_argument("--task-kind", required=True)
+    shadow.add_argument("--baseline-plan", default="fast")
+    shadow.add_argument("--minimum-samples", type=int, default=30)
+    shadow.add_argument("--telemetry-path", type=Path, default=None)
+    shadow.add_argument("--json", action="store_true")
     return parser
 
 
@@ -462,21 +511,62 @@ def main(argv: list[str] | None = None) -> int:
             refresh_probe=args.refresh_probe,
         )
         plan = next(plan for plan in plans if plan.id == args.plan)
-        runner = CouncilRunner(HermesInvoker(timeout=args.timeout), max_workers=3)
+        base_invoker = HermesInvoker(timeout=args.timeout)
+        invoker: Callable[[ModelSpec, str, str, str], str] = base_invoker
+        telemetry_run_id: str | None = None
+        telemetry_db_path: Path | None = None
+        if args.telemetry:
+            try:
+                telemetry_db_path = args.telemetry_path or _telemetry_path()
+                telemetry_store = TelemetryStore(telemetry_db_path)
+                run_id = datetime.now(UTC).strftime("run-%Y%m%dT%H%M%S%fZ")
+                telemetry_run_id = run_id
+                invoker = TelemetryInvoker(
+                    invoke=base_invoker,
+                    store=telemetry_store,
+                    task_profile=profile,
+                    plan_id=plan.id,
+                    run_id=run_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - optional telemetry boundary
+                telemetry_run_id = None
+                telemetry_db_path = None
+                print(f"Telemetry disabled: {type(exc).__name__}", file=sys.stderr)
+                invoker = base_invoker
+        else:
+            invoker = base_invoker
+        runner = CouncilRunner(invoker, max_workers=3)
         result = runner.run(args.task, plan)
         payload = _result_payload(
             result,
             probe_call_count=probe_call_count,
             probe_cache_hit_count=probe_cache_hit_count,
         )
+        if telemetry_run_id is not None:
+            payload["telemetry_run_id"] = telemetry_run_id
+            payload["telemetry_path"] = str(telemetry_db_path)
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(result.final)
+            if result.degraded:
+                print(
+                    "\n[model-council degraded: "
+                    f"reason={result.degradation_reason}, candidates={result.candidate_count}, "
+                    f"review_coverage={result.review_coverage:.2f}, "
+                    f"fallback={result.fallback_source or 'none'}, "
+                    f"task_truncated={'yes' if result.task_truncated else 'no'}]",
+                    file=sys.stderr,
+                )
             if result.failures:
                 print("\nDegraded participants:", file=sys.stderr)
                 for failure in result.failures:
                     print(f"- {failure}", file=sys.stderr)
+            if telemetry_run_id is not None:
+                print(
+                    f"\n[telemetry run_id={telemetry_run_id} path={telemetry_db_path}]",
+                    file=sys.stderr,
+                )
             print(
                 "\n[model-council calls: "
                 f"probe={probe_call_count}, execution={result.call_count}, "
@@ -517,6 +607,78 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Installed native Hermes MoA presets. Backup: {backup}")
             print(f"Default preset: {payload['default_preset']}")
             print("Presets: " + ", ".join(str(name) for name in preset_names))
+        return 0
+
+    if args.command == "record-outcome":
+        store = TelemetryStore(args.telemetry_path or _telemetry_path())
+        event_id = store.record_outcome_for_run(
+            run_id=args.run_id,
+            outcome=OutcomeKind(args.outcome),
+            evaluator_score=args.evaluator_score,
+            feedback=FeedbackKind(args.feedback),
+            failure_code=args.failure_code,
+        )
+        payload = {"event_id": event_id, "run_id": args.run_id, "recorded": True}
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"Recorded final outcome for {args.run_id}: {event_id}")
+        return 0
+
+    if args.command == "performance-report":
+        store = TelemetryStore.open_read_only(args.telemetry_path or _telemetry_path())
+        report = build_performance_report(
+            store.summarize_runs(task_kind=args.task_kind),
+            task_kind=args.task_kind,
+            baseline_plan=args.baseline_plan,
+            minimum_samples=args.minimum_samples,
+        )
+        payload = report.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(
+                f"Performance report: task={report.task_kind}, ready={report.ready}, "
+                f"minimum_samples={report.minimum_samples}"
+            )
+            for plan_metrics in report.plans:
+                print(
+                    f"- {plan_metrics.plan_id}: n={plan_metrics.known_outcomes}, "
+                    f"success={plan_metrics.success_rate}, "
+                    f"score_regret={plan_metrics.score_regret}, "
+                    f"latency_regret_ms={plan_metrics.latency_regret_ms}"
+                )
+            for warning in report.warnings:
+                print(f"warning: {warning}", file=sys.stderr)
+        return 0
+
+    if args.command == "shadow-router-report":
+        store = TelemetryStore.open_read_only(args.telemetry_path or _telemetry_path())
+        performance = build_performance_report(
+            store.summarize_runs(task_kind=args.task_kind),
+            task_kind=args.task_kind,
+            baseline_plan=args.baseline_plan,
+            minimum_samples=args.minimum_samples,
+        )
+        shadow_report = build_shadow_router_report(performance)
+        payload = shadow_report.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(
+                f"Shadow router report: task={shadow_report.task_kind}, "
+                f"ready={shadow_report.ready}, "
+                "apply_automatically=false"
+            )
+            for proposal in shadow_report.proposals:
+                print(
+                    f"- candidate={proposal.candidate_plan}, "
+                    f"baseline={proposal.baseline_plan}, "
+                    f"score_delta={proposal.score_delta}, "
+                    f"latency_delta_ms={proposal.latency_delta_ms}"
+                )
+            for warning in shadow_report.warnings:
+                print(f"warning: {warning}", file=sys.stderr)
         return 0
 
     return 2
