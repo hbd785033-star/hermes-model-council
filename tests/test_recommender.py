@@ -116,7 +116,26 @@ class RecommendPlansTests(unittest.TestCase):
         }
         self.assertNotIn(quality.chairman.model.model.lower(), advisor_names)
 
-    def test_quality_risk_describes_cross_role_bias_after_self_exclusion(self):
+    def test_quality_advisors_are_unique_by_canonical_model_identity(self):
+        models = [
+            ModelSpec("provider-a", "shared-model", "family-a", healthy=True),
+            ModelSpec("provider-b", "shared-model", "family-b", healthy=True),
+            ModelSpec("provider-c", "distinct-model", "family-c", healthy=True),
+            ModelSpec("provider-d", "chair-model", "family-d", healthy=True),
+        ]
+
+        quality = recommend_plans(
+            TaskProfile("decision", 5, 5, False, False, True), models
+        )[2]
+
+        advisor_names = [
+            p.model.model.casefold()
+            for p in quality.participants
+            if p.role.startswith("advisor")
+        ]
+        self.assertEqual(len(advisor_names), len(set(advisor_names)))
+
+    def test_quality_risk_discloses_when_peer_review_is_skipped(self):
         models = [
             ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=True),
             ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=True),
@@ -126,8 +145,9 @@ class RecommendPlansTests(unittest.TestCase):
         )[2]
 
         risks = " ".join(quality.risks)
-        self.assertIn("不评审自己的候选答案", risks)
-        self.assertNotIn("评审者与候选答案可能重叠", risks)
+        self.assertIn("跳过互评", risks)
+        self.assertNotIn("不评审自己的候选答案", risks)
+        self.assertNotIn("匿名互评", " ".join(quality.strengths))
 
     def test_rejects_empty_usable_inventory(self):
         models = [ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", healthy=False)]

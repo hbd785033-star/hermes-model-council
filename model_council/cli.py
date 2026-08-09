@@ -60,6 +60,8 @@ def plan_to_dict(plan: Plan) -> dict[str, Any]:
         "mode": plan.mode,
         "estimated_calls": plan.estimated_calls,
         "max_calls": plan.max_calls,
+        "degraded": plan.degraded,
+        "degradation_reason": plan.degradation_reason,
         "strengths": list(plan.strengths),
         "risks": list(plan.risks),
         "participants": [
@@ -285,6 +287,12 @@ def _result_payload(
         "probe_cache_hit_count": probe_cache_hit_count,
         "execution_call_count": result.call_count,
         "total_call_count": total,
+        "degraded": result.degraded,
+        "degradation_reason": result.degradation_reason,
+        "candidate_count": result.candidate_count,
+        "review_coverage": result.review_coverage,
+        "fallback_source": result.fallback_source,
+        "task_truncated": result.task_truncated,
     }
 
 
