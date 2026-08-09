@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .analysis import TaskProfile
@@ -25,6 +26,8 @@ class Plan:
     max_calls: int
     strengths: tuple[str, ...]
     risks: tuple[str, ...]
+    degraded: bool = False
+    degradation_reason: str | None = None
 
     @property
     def chairman(self) -> Participant:
@@ -39,13 +42,42 @@ _PREMIUM_NAMES = ("fable", "opus", "sol-pro", "sol", "pro")
 
 
 def _normalized_model_name(name: str) -> str:
-    """Normalize provider aliases enough to detect same-model cross-provider reuse."""
-    return " ".join(str(name or "").casefold().split())
+    """Conservatively normalize cosmetic aliases in display model names."""
+    value = re.sub(r"[^a-z0-9]+", "-", str(name or "").casefold()).strip("-")
+    return value
 
 
 def canonical_model_identity(model: ModelSpec) -> str:
-    """Return the provider-independent identity used for diversity boundaries."""
-    return _normalized_model_name(model.model)
+    """Return a conservative display-name identity used for diversity boundaries.
+
+    Inventory currently has no authoritative underlying-model ID, so this only
+    collapses case, whitespace, punctuation and an explicit provider/family
+    prefix. It deliberately does not claim semantic alias resolution.
+    """
+    value = str(model.model or "").casefold().strip()
+    for separator in (":", "/"):
+        if separator in value:
+            prefix, remainder = value.split(separator, 1)
+            provider_tokens = {
+                _normalized_model_name(model.provider),
+                _normalized_model_name(model.family),
+            }
+            if _normalized_model_name(prefix) in provider_tokens:
+                value = remainder
+                break
+    return _normalized_model_name(value)
+
+
+def has_independent_candidate(
+    reviewer: ModelSpec,
+    candidates: list[ModelSpec] | tuple[ModelSpec, ...],
+) -> bool:
+    """Return whether a reviewer has at least one non-self candidate."""
+    reviewer_identity = canonical_model_identity(reviewer)
+    return any(
+        canonical_model_identity(candidate) != reviewer_identity
+        for candidate in candidates
+    )
 
 
 def _tier_score(model: ModelSpec) -> float:
@@ -161,6 +193,8 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
                 max_calls=1,
                 strengths=("保留已验证模型的可用结果", "不制造虚假多模型共识"),
                 risks=("仅有一个已验证健康模型，本方案已降级为单模型", *execution_risks),
+                degraded=True,
+                degradation_reason="single_model_inventory",
             )
 
         return [
@@ -176,8 +210,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
         for model in _diverse_selection(_rank(balanced_usable, profile, "advisor"), 3)
         if (
             model != primary
-            and _normalized_model_name(model.model)
-            != _normalized_model_name(primary.model)
+            and canonical_model_identity(model) != canonical_model_identity(primary)
         )
     ]
     if not references:
@@ -186,8 +219,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
             for model in _rank(balanced_usable, profile, "advisor")
             if (
                 model != primary
-                and _normalized_model_name(model.model)
-                != _normalized_model_name(primary.model)
+                and canonical_model_identity(model) != canonical_model_identity(primary)
             )
         ]
     reference = references[0] if references else primary
@@ -208,7 +240,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     balanced_risks = ["增加参考模型调用", *execution_risks]
     if reference.family == primary.family:
         balanced_risks.append("当前没有第二个可用模型家族，独立性有限")
-    if _normalized_model_name(reference.model) == _normalized_model_name(primary.model):
+    if canonical_model_identity(reference) == canonical_model_identity(primary):
         balanced_risks.append("Advisor 与 Aggregator 使用同名模型，独立性有限")
     balanced = Plan(
         id="balanced",
@@ -221,24 +253,25 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
         risks=tuple(balanced_risks),
     )
 
-    distinct_model_names = {
-        _normalized_model_name(model.model) for model in usable
-    }
+    distinct_model_names = {canonical_model_identity(model) for model in usable}
     advisor_limit = min(3, max(1, len(distinct_model_names) - 1))
     advisors = _diverse_selection(
         _rank(usable, profile, "advisor"), advisor_limit
     )
     advisor_keys = {model.key for model in advisors}
-    advisor_names = {_normalized_model_name(model.model) for model in advisors}
+    advisor_names = {canonical_model_identity(model) for model in advisors}
     chairman_pool = [
         model
         for model in usable
         if model.key not in advisor_keys
-        and _normalized_model_name(model.model) not in advisor_names
+        and canonical_model_identity(model) not in advisor_names
     ]
     chairman_pool = chairman_pool or [m for m in usable if m.key not in advisor_keys] or usable
     chairman_model = _rank(chairman_pool, profile, "chairman")[0]
-    reviewer_count = min(2, len(advisors)) if len(advisors) >= 2 else 0
+    reviewer_count = len([
+        model for model in advisors
+        if has_independent_candidate(model, tuple(advisors))
+    ][:2]) if len(advisors) >= 2 else 0
     calls = len(advisors) + reviewer_count + 1
     quality_participants = [
         Participant(f"advisor-{index}", model, _effort(profile, premium=True))
@@ -254,7 +287,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
         quality_risks.append("成功候选不足两个时跳过互评并结构化披露降级")
     if chairman_model.key in advisor_keys:
         quality_risks.append("没有独立的Chairman模型，已降级与Advisor同源")
-    if _normalized_model_name(chairman_model.model) in advisor_names:
+    if canonical_model_identity(chairman_model) in advisor_names:
         quality_risks.append("没有独立的Chairman模型名，已降级与Advisor同名")
     if len({model.family for model in advisors}) < 2:
         quality_risks.append("模型家族多样性不足")

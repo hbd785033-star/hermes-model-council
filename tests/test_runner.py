@@ -197,7 +197,10 @@ class CouncilRunnerTests(unittest.TestCase):
         self.assertEqual(_failure_code(RuntimeError("timed out after 240s using secret:model")), "timeout")
         self.assertEqual(_failure_code(RuntimeError("provider returned HTTP 429")), "rate_limited")
         self.assertEqual(_failure_code(RuntimeError("authentication failed using secret:model")), "authentication")
-        self.assertEqual(_failure_code(RuntimeError("unexpected provider failure")), "runtimeerror")
+        self.assertEqual(
+            _failure_code(RuntimeError("unexpected provider failure")),
+            "invocation_error",
+        )
 
     def test_single_path_clips_task_before_fixed_prompt_suffix(self):
         model = ModelSpec("provider-a", "model-a", "family-a")

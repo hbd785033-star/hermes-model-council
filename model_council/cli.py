@@ -60,6 +60,8 @@ def plan_to_dict(plan: Plan) -> dict[str, Any]:
         "mode": plan.mode,
         "estimated_calls": plan.estimated_calls,
         "max_calls": plan.max_calls,
+        "degraded": plan.degraded,
+        "degradation_reason": plan.degradation_reason,
         "strengths": list(plan.strengths),
         "risks": list(plan.risks),
         "participants": [
