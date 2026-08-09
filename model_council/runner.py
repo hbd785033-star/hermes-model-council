@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from .inventory import ModelSpec
-from .recommender import Participant, Plan
+from .recommender import Participant, Plan, canonical_model_identity
 
 Invoker = Callable[[ModelSpec, str, str, str], str]
 
@@ -43,6 +43,12 @@ class CouncilResult:
     reviews: tuple[str, ...]
     failures: tuple[str, ...]
     call_count: int
+    degraded: bool = False
+    degradation_reason: str | None = None
+    candidate_count: int = 0
+    review_coverage: float = 0.0
+    fallback_source: str | None = None
+    task_truncated: bool = False
 
 
 class CouncilRunner:
@@ -61,7 +67,8 @@ class CouncilRunner:
                 participant.role.startswith("advisor")
                 for participant in plan.participants
             )
-            return advisor_count + min(2, advisor_count) + 1
+            reviewer_count = min(2, advisor_count) if advisor_count >= 2 else 0
+            return advisor_count + reviewer_count + 1
         return 0
 
     def run(self, task: str, plan: Plan, *, seed: int | None = None) -> CouncilResult:
@@ -94,6 +101,8 @@ class CouncilRunner:
     def _parallel(
         self, participants: list[Participant], prompts: list[str], role_prefix: str
     ) -> tuple[list[tuple[Participant, str]], list[str], int]:
+        if not participants:
+            return [], [], 0
         completed: dict[int, tuple[Participant, str]] = {}
         failures: list[str] = []
         with ThreadPoolExecutor(max_workers=min(self.max_workers, len(participants))) as pool:
@@ -243,42 +252,52 @@ class CouncilRunner:
         shuffled = list(raw_answers)
         rng.shuffle(shuffled)
         known_models = [participant.model for participant, _ in raw_answers]
-        anonymous_answers = tuple(
+        candidates = tuple(
             (
-                chr(ord("A") + index),
+                f"candidate-{index:02d}",
+                participant,
                 self._scrub_identities(text, known_models),
             )
-            for index, (_, text) in enumerate(shuffled)
+            for index, (participant, text) in enumerate(shuffled, start=1)
         )
-        reviewers = advisors[: min(2, len(advisors))]
+        anonymous_answers = tuple(
+            (candidate_id, text) for candidate_id, _, text in candidates
+        )
+        reviewers = []
+        if len(candidates) >= 2:
+            reviewers = [
+                reviewer
+                for reviewer in advisors
+                if any(
+                    canonical_model_identity(participant.model)
+                    != canonical_model_identity(reviewer.model)
+                    for _, participant, _ in candidates
+                )
+            ][:2]
         review_prompts = []
         for reviewer in reviewers:
             reviewer_answers = [
-                (participant, text)
-                for participant, text in raw_answers
-                if participant.model.key != reviewer.model.key
+                (candidate_id, participant, text)
+                for candidate_id, participant, text in candidates
+                if canonical_model_identity(participant.model)
+                != canonical_model_identity(reviewer.model)
             ]
             reviewer_rng = random.Random(rng.random())
             reviewer_rng.shuffle(reviewer_answers)
-            reviewer_models = [participant.model for participant, _ in reviewer_answers]
-            reviewer_anonymous = tuple(
-                (
-                    chr(ord("A") + index),
-                    self._scrub_identities(text, reviewer_models),
-                )
-                for index, (_, text) in enumerate(reviewer_answers)
-            )
             reviewer_block = self._bounded_block(
-                [(f"Response {label}", text) for label, text in reviewer_anonymous],
+                [
+                    (f"Response {candidate_id}", text)
+                    for candidate_id, _, text in reviewer_answers
+                ],
                 _MAX_REFERENCE_BLOCK_CHARS,
-            ) or "No other candidate answer succeeded."
+            )
             review_prompts.append(
                 "You are peer-reviewing anonymized council answers. Model identities are intentionally "
                 "hidden. Judge only correctness, evidence, completeness, and actionable value.\n\n"
                 f"TASK:\n{self._clip(task, _MAX_STAGE_TASK_CHARS)}\n\n"
                 f"{reviewer_block}\n\n"
                 "Return at most 800 words: strongest response, largest blind spot, key disagreement, "
-                "and what all answers missed."
+                "and what all answers missed. Refer to candidates only by their exact candidate IDs."
             )
         reviews_raw, review_failures, review_calls = self._parallel(
             reviewers, review_prompts, "reviewer"
@@ -287,6 +306,7 @@ class CouncilRunner:
         reviews = tuple(
             self._scrub_identities(text, known_models) for _, text in reviews_raw
         )
+        review_coverage = len(reviews) / len(reviewers) if reviewers else 0.0
         chairman_answer_block = self._bounded_block(
             [(f"Response {label}", text) for label, text in anonymous_answers],
             _MAX_CHAIRMAN_ANSWER_CHARS,
@@ -305,6 +325,8 @@ class CouncilRunner:
             "Structure in at most 1,200 words: Council agreement; important disagreements; "
             "blind spots; final recommendation; first concrete action."
         )
+        fallback_source: str | None = None
+        chairman_failed = False
         try:
             final = self.invoke(
                 chairman.model,
@@ -313,11 +335,22 @@ class CouncilRunner:
                 chairman.reasoning_effort,
             )
         except Exception as exc:  # noqa: BLE001 - model invocation boundary
+            chairman_failed = True
             failures.append(
                 f"chairman failed: {_failure_code(exc)}"
             )
             label, text = anonymous_answers[0]
             final = f"Candidate {label}:\n{text}"
+            fallback_source = label
+        candidate_count = len(anonymous_answers)
+        degraded = candidate_count < 2 or review_coverage < 1.0 or chairman_failed
+        degradation_reason: str | None = None
+        if candidate_count < 2:
+            degradation_reason = "insufficient_candidates"
+        elif review_coverage < 1.0:
+            degradation_reason = "peer_review_incomplete"
+        elif chairman_failed:
+            degradation_reason = "chairman_failed"
         return CouncilResult(
             plan.id,
             final,
@@ -325,4 +358,10 @@ class CouncilRunner:
             reviews,
             tuple(failures),
             advisor_calls + review_calls + 1,
+            degraded,
+            degradation_reason,
+            candidate_count,
+            review_coverage,
+            fallback_source,
+            len(str(task)) > _MAX_STAGE_TASK_CHARS,
         )

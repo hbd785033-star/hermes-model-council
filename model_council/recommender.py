@@ -43,6 +43,11 @@ def _normalized_model_name(name: str) -> str:
     return " ".join(str(name or "").casefold().split())
 
 
+def canonical_model_identity(model: ModelSpec) -> str:
+    """Return the provider-independent identity used for diversity boundaries."""
+    return _normalized_model_name(model.model)
+
+
 def _tier_score(model: ModelSpec) -> float:
     name = model.model.lower()
     score = 2.0
@@ -86,15 +91,22 @@ def _rank(models: list[ModelSpec], profile: TaskProfile, role: str) -> list[Mode
 def _diverse_selection(ranked: list[ModelSpec], limit: int) -> list[ModelSpec]:
     selected: list[ModelSpec] = []
     used_families: set[str] = set()
+    used_models: set[str] = set()
     for model in ranked:
+        identity = canonical_model_identity(model)
+        if identity in used_models:
+            continue
         if model.family not in used_families:
             selected.append(model)
             used_families.add(model.family)
+            used_models.add(identity)
             if len(selected) == limit:
                 return selected
     for model in ranked:
-        if model not in selected:
+        identity = canonical_model_identity(model)
+        if model not in selected and identity not in used_models:
             selected.append(model)
+            used_models.add(identity)
             if len(selected) == limit:
                 break
     return selected
@@ -226,7 +238,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     ]
     chairman_pool = chairman_pool or [m for m in usable if m.key not in advisor_keys] or usable
     chairman_model = _rank(chairman_pool, profile, "chairman")[0]
-    reviewer_count = min(2, len(advisors))
+    reviewer_count = min(2, len(advisors)) if len(advisors) >= 2 else 0
     calls = len(advisors) + reviewer_count + 1
     quality_participants = [
         Participant(f"advisor-{index}", model, _effort(profile, premium=True))
@@ -235,14 +247,22 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     quality_participants.append(
         Participant("chairman", chairman_model, _effort(profile, premium=True))
     )
-    quality_risks = ["调用次数与延迟最高", "匿名互评会消耗额外上下文", *execution_risks]
+    quality_risks = ["调用次数与延迟最高", *execution_risks]
+    if reviewer_count:
+        quality_risks.append("匿名互评会消耗额外上下文")
+    else:
+        quality_risks.append("成功候选不足两个时跳过互评并结构化披露降级")
     if chairman_model.key in advisor_keys:
         quality_risks.append("没有独立的Chairman模型，已降级与Advisor同源")
     if _normalized_model_name(chairman_model.model) in advisor_names:
         quality_risks.append("没有独立的Chairman模型名，已降级与Advisor同名")
     if len({model.family for model in advisors}) < 2:
         quality_risks.append("模型家族多样性不足")
-    quality_risks.append("评审者也参与候选生成，但不评审自己的候选答案")
+    if reviewer_count:
+        quality_risks.append("评审者也参与候选生成，但不评审自己的候选答案")
+    quality_strengths = ["独立生成", "Chairman 仲裁"]
+    if reviewer_count:
+        quality_strengths.insert(1, "匿名互评")
     quality = Plan(
         id="quality",
         label="质量优先/Council",
@@ -250,7 +270,7 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
         participants=tuple(quality_participants),
         estimated_calls=calls,
         max_calls=9,
-        strengths=("独立生成", "匿名互评", "Chairman 仲裁"),
+        strengths=tuple(quality_strengths),
         risks=tuple(quality_risks),
     )
     return [fast, balanced, quality]

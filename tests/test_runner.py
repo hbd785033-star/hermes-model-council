@@ -6,6 +6,101 @@ from model_council.runner import CouncilRunner, _failure_code
 
 
 class CouncilRunnerTests(unittest.TestCase):
+    def test_candidate_ids_are_stable_across_reviewers_and_chairman(self):
+        models = [
+            ModelSpec("provider-a", "model-a", "family-a"),
+            ModelSpec("provider-b", "model-b", "family-b"),
+            ModelSpec("provider-c", "model-c", "family-c"),
+            ModelSpec("provider-d", "model-d", "family-d"),
+        ]
+        plan = Plan(
+            "quality", "Quality", "council",
+            (
+                Participant("advisor-1", models[0], "high"),
+                Participant("advisor-2", models[1], "high"),
+                Participant("advisor-3", models[2], "high"),
+                Participant("chairman", models[3], "high"),
+            ),
+            6, 9, (), (),
+        )
+        prompts = []
+        answers = {
+            models[0].key: "CONTENT_ONE",
+            models[1].key: "CONTENT_TWO",
+            models[2].key: "CONTENT_THREE",
+        }
+
+        def invoke(model, prompt, role, effort):
+            prompts.append((model.key, role, prompt))
+            if role.startswith("advisor"):
+                return answers[model.key]
+            if role.startswith("reviewer"):
+                return "candidate-01 is strongest"
+            return "final"
+
+        result = CouncilRunner(invoke=invoke, max_workers=1).run("task", plan, seed=7)
+
+        candidate_map = dict(result.anonymous_answers)
+        self.assertEqual(set(candidate_map), {"candidate-01", "candidate-02", "candidate-03"})
+        for _, role, prompt in prompts:
+            if role.startswith("reviewer") or role == "chairman":
+                for candidate_id, content in candidate_map.items():
+                    if content in prompt:
+                        self.assertIn(candidate_id, prompt)
+        chairman_prompt = next(prompt for _, role, prompt in prompts if role == "chairman")
+        self.assertIn("candidate-01 is strongest", chairman_prompt)
+
+    def test_single_candidate_skips_empty_peer_review_and_discloses_degradation(self):
+        advisor = ModelSpec("provider-a", "model-a", "family-a")
+        chairman = ModelSpec("provider-b", "model-b", "family-b")
+        plan = Plan(
+            "quality", "Quality", "council",
+            (
+                Participant("advisor-1", advisor, "high"),
+                Participant("chairman", chairman, "high"),
+            ),
+            2, 3, (), (),
+        )
+        roles = []
+
+        def invoke(model, prompt, role, effort):
+            roles.append(role)
+            return "candidate" if role.startswith("advisor") else "final"
+
+        result = CouncilRunner(invoke=invoke, max_workers=1).run("task", plan, seed=1)
+
+        self.assertFalse(any(role.startswith("reviewer") for role in roles))
+        self.assertEqual(result.call_count, 2)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.degradation_reason, "insufficient_candidates")
+        self.assertEqual(result.candidate_count, 1)
+        self.assertEqual(result.review_coverage, 0.0)
+
+    def test_cross_provider_aliases_never_receive_empty_self_review(self):
+        alias_a = ModelSpec("provider-a", "shared-model", "family-a")
+        alias_b = ModelSpec("provider-b", "shared-model", "family-b")
+        chairman = ModelSpec("provider-c", "chair-model", "family-c")
+        plan = Plan(
+            "quality", "Quality", "council",
+            (
+                Participant("advisor-1", alias_a, "high"),
+                Participant("advisor-2", alias_b, "high"),
+                Participant("chairman", chairman, "high"),
+            ),
+            5, 5, (), (),
+        )
+        roles = []
+
+        def invoke(model, prompt, role, effort):
+            roles.append(role)
+            return "candidate" if role.startswith("advisor") else "final"
+
+        result = CouncilRunner(invoke=invoke, max_workers=1).run("task", plan)
+
+        self.assertFalse(any(role.startswith("reviewer") for role in roles))
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.degradation_reason, "peer_review_incomplete")
+
     def test_runs_anonymous_peer_review_then_chairman(self):
         openai = ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=True)
         claude = ModelSpec("anthropic", "claude-opus-4-6", "anthropic", healthy=True)
