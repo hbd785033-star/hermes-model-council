@@ -15,12 +15,13 @@ from pathlib import Path
 from typing import Any
 
 from .analysis import TaskProfile, analyze_task
+from .decision import CouncilResult, DecisionRecord
 from .health import HealthCache, ProbeResult, probe_models
 from .hermes_invoker import HermesInvoker
 from .inventory import ModelSpec, discover_models
 from .presets import build_native_moa_config
 from .recommender import Plan, recommend_plans
-from .runner import CouncilResult, CouncilRunner
+from .runner import CouncilRunner
 
 
 def _health_cache_path() -> Path:
@@ -268,15 +269,64 @@ def _print_recommendation(
 
 
 def _result_payload(
-    result: CouncilResult,
+    result: DecisionRecord | CouncilResult,
     *,
     probe_call_count: int = 0,
     probe_cache_hit_count: int = 0,
 ) -> dict[str, Any]:
-    total = probe_call_count + result.call_count
+    process: str | None
+    if isinstance(result, DecisionRecord):
+        status = result.status.value
+        decision = result.decision
+        decision_id = result.decision_id
+        process = result.process.value
+        preset = result.preset
+        policy_version = result.policy_version
+        models_consulted = list(result.models_consulted)
+        configured_call_ceiling = result.configured_call_ceiling
+        topology_required_calls = result.topology_required_calls
+        observed_calls = result.observed_calls
+        fallback_used = result.fallback_used
+        fallback_reason = result.fallback_reason
+        degraded_reasons = list(result.degraded_reasons)
+        warnings = list(result.warnings)
+    else:
+        status = "degraded" if result.degraded else "completed"
+        decision = result.final or None
+        decision_id = None
+        process = result.actual_process.value if result.actual_process is not None else None
+        preset = result.plan_id
+        policy_version = None
+        models_consulted = []
+        configured_call_ceiling = None
+        topology_required_calls = None
+        observed_calls = result.call_count
+        fallback_used = result.fallback_source is not None
+        fallback_reason = result.degradation_reason if fallback_used else None
+        degraded_reasons = (
+            [result.degradation_reason]
+            if result.degradation_reason is not None
+            else []
+        )
+        warnings = list(result.failures)
+    total = probe_call_count + observed_calls if observed_calls is not None else None
     return {
         "plan": result.plan_id,
         "final": result.final,
+        "status": status,
+        "decision": decision,
+        "decision_id": decision_id,
+        "process": process,
+        "preset": preset,
+        "policy_version": policy_version,
+        "models_consulted": models_consulted,
+        "configured_call_ceiling": configured_call_ceiling,
+        "topology_required_calls": topology_required_calls,
+        "observed_calls": observed_calls,
+        "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason,
+        "degraded_reasons": degraded_reasons,
+        "warnings": warnings,
         "anonymous_answers": [
             {"label": label, "text": text} for label, text in result.anonymous_answers
         ],

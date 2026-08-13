@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .decision import DecisionProcess, DecisionRecord, DecisionStatus
 from .recommender import Participant, Plan
 
 BALANCED_PRESET = "model-council-balanced"
@@ -77,3 +78,44 @@ def build_native_moa_config(
         "privacy_filter": "full",
     }
     return result
+
+
+def native_moa_decision_record(
+    plan: Plan,
+    *,
+    decision: str | None,
+    models_consulted: tuple[str, ...] = (),
+    observed_calls: int | None = None,
+    degraded_reasons: tuple[str, ...] = (),
+    fallback_reason: str | None = None,
+    warnings: tuple[str, ...] = (),
+) -> DecisionRecord:
+    """Record an externally executed native Hermes MoA decision truthfully.
+
+    Building this record does not execute Hermes or claim external evaluation.
+    Native MoA uses reference models followed by an aggregator; it is not the
+    custom anonymous-review Council process even when the preset is `quality`.
+    """
+    native_config = _preset(plan, reference_max_tokens=900)
+    reference_count = len(native_config["reference_models"])
+    normalized_decision = str(decision or "").strip() or None
+    if normalized_decision is None:
+        status = DecisionStatus.FAILED
+    elif degraded_reasons or fallback_reason is not None:
+        status = DecisionStatus.DEGRADED
+    else:
+        status = DecisionStatus.COMPLETED
+    return DecisionRecord(
+        status=status,
+        decision=normalized_decision,
+        process=DecisionProcess.NATIVE_MOA,
+        preset=plan.id,
+        models_consulted=tuple(dict.fromkeys(models_consulted)),
+        configured_call_ceiling=None,
+        topology_required_calls=reference_count + 1,
+        observed_calls=observed_calls,
+        fallback_used=fallback_reason is not None,
+        fallback_reason=fallback_reason,
+        degraded_reasons=degraded_reasons,
+        warnings=warnings,
+    )
