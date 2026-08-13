@@ -238,6 +238,10 @@ class DecisionRecordTests(unittest.TestCase):
 
         native_record = native_moa_decision_record(
             plan,
+            normalized_preset={
+                "reference_models": [{"model": "a"}, {"model": "b"}, {"model": "c"}],
+                "aggregator": {"model": "aggregator"},
+            },
             decision="native aggregator decision",
             models_consulted=("model-a", "model-b", "model-c", "model-d"),
         )
@@ -349,6 +353,10 @@ class DecisionRecordTests(unittest.TestCase):
         plan = self._quality_plan()
         record = native_moa_decision_record(
             plan,
+            normalized_preset={
+                "reference_models": [{"model": "a"}, {"model": "b"}, {"model": "c"}],
+                "aggregator": {"model": "aggregator"},
+            },
             decision="native decision",
             models_consulted=("model-a", "model-b", "model-c", "model-d"),
         )
