@@ -5,7 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from .decision import DecisionProcess, DecisionRecord, DecisionStatus
+from .decision import DecisionRecord
+from .hermes_native import adapt_native_moa_outcome
 from .recommender import Participant, Plan
 
 BALANCED_PRESET = "model-council-balanced"
@@ -83,6 +84,7 @@ def build_native_moa_config(
 def native_moa_decision_record(
     plan: Plan,
     *,
+    normalized_preset: dict[str, Any] | None = None,
     decision: str | None,
     models_consulted: tuple[str, ...] = (),
     observed_calls: int | None = None,
@@ -96,26 +98,15 @@ def native_moa_decision_record(
     Native MoA uses reference models followed by an aggregator; it is not the
     custom anonymous-review Council process even when the preset is `quality`.
     """
-    native_config = _preset(plan, reference_max_tokens=900)
-    reference_count = len(native_config["reference_models"])
-    normalized_decision = str(decision or "").strip() or None
-    if normalized_decision is None:
-        status = DecisionStatus.FAILED
-    elif degraded_reasons or fallback_reason is not None:
-        status = DecisionStatus.DEGRADED
-    else:
-        status = DecisionStatus.COMPLETED
-    return DecisionRecord(
-        status=status,
-        decision=normalized_decision,
-        process=DecisionProcess.NATIVE_MOA,
+    if normalized_preset is None:
+        raise ValueError("normalized native preset evidence is required")
+    return adapt_native_moa_outcome(
         preset=plan.id,
-        models_consulted=tuple(dict.fromkeys(models_consulted)),
-        configured_call_ceiling=None,
-        topology_required_calls=reference_count + 1,
+        normalized_preset=normalized_preset,
+        decision=decision,
+        models_consulted=models_consulted,
         observed_calls=observed_calls,
-        fallback_used=fallback_reason is not None,
-        fallback_reason=fallback_reason,
         degraded_reasons=degraded_reasons,
+        fallback_reason=fallback_reason,
         warnings=warnings,
     )
