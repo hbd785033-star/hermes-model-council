@@ -6,8 +6,13 @@ import random
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 
+from .decision import (
+    CouncilResult,
+    DecisionProcess,
+    DecisionRecord,
+    DecisionStatus,
+)
 from .inventory import ModelSpec
 from .recommender import (
     Participant,
@@ -40,20 +45,20 @@ def _failure_code(exc: Exception) -> str:
     return "invocation_error"
 
 
-@dataclass(frozen=True)
-class CouncilResult:
-    plan_id: str
-    final: str
-    anonymous_answers: tuple[tuple[str, str], ...]
-    reviews: tuple[str, ...]
-    failures: tuple[str, ...]
-    call_count: int
-    degraded: bool = False
-    degradation_reason: str | None = None
-    candidate_count: int = 0
-    review_coverage: float = 0.0
-    fallback_source: str | None = None
-    task_truncated: bool = False
+class _DecisionExecutionFailure(RuntimeError):
+    def __init__(
+        self,
+        reason: str,
+        *,
+        observed_calls: int,
+        warnings: tuple[str, ...],
+        actual_process: DecisionProcess,
+    ):
+        super().__init__(reason)
+        self.reason = reason
+        self.observed_calls = observed_calls
+        self.warnings = warnings
+        self.actual_process = actual_process
 
 
 class CouncilRunner:
@@ -94,7 +99,7 @@ class CouncilRunner:
             return advisor_count + len(cls._eligible_reviewers(advisors, advisors)) + 1
         return 0
 
-    def run(self, task: str, plan: Plan, *, seed: int | None = None) -> CouncilResult:
+    def run(self, task: str, plan: Plan, *, seed: int | None = None) -> DecisionRecord:
         if not str(task or "").strip():
             raise ValueError("task must not be empty")
         required_calls = self._required_calls(plan)
@@ -114,13 +119,72 @@ class CouncilRunner:
             raise ValueError(
                 f"Plan exceeds call budget: {enforced_calls} > {plan.max_calls}"
             )
-        if plan.mode == "single":
-            return self._run_single(task, plan)
-        if plan.mode == "moa":
-            return self._run_moa(task, plan)
-        if plan.mode == "council":
-            return self._run_council(task, plan, seed=seed)
-        raise ValueError(f"Unsupported plan mode: {plan.mode}")
+        try:
+            if plan.mode == "single":
+                result = self._run_single(task, plan)
+            elif plan.mode == "moa":
+                result = self._run_moa(task, plan)
+            elif plan.mode == "council":
+                result = self._run_council(task, plan, seed=seed)
+            else:
+                raise ValueError(f"Unsupported plan mode: {plan.mode}")
+        except _DecisionExecutionFailure as exc:
+            return DecisionRecord(
+                status=DecisionStatus.FAILED,
+                decision=None,
+                process=exc.actual_process,
+                preset=plan.id,
+                models_consulted=tuple(
+                    canonical_model_identity(participant.model)
+                    for participant in plan.participants[:exc.observed_calls]
+                ),
+                configured_call_ceiling=plan.max_calls,
+                topology_required_calls=required_calls,
+                observed_calls=exc.observed_calls,
+                degraded_reasons=(exc.reason,),
+                warnings=exc.warnings,
+            )
+        if result.actual_process is None:
+            raise ValueError("execution result is missing actual process evidence")
+        return DecisionRecord(
+            status=(
+                DecisionStatus.DEGRADED
+                if result.degraded
+                else DecisionStatus.COMPLETED
+            ),
+            decision=result.final,
+            process=result.actual_process,
+            preset=plan.id,
+            models_consulted=tuple(
+                dict.fromkeys(
+                    canonical_model_identity(participant.model)
+                    for participant in plan.participants
+                )
+            ),
+            configured_call_ceiling=plan.max_calls,
+            topology_required_calls=required_calls,
+            observed_calls=result.call_count,
+            fallback_used=result.fallback_source is not None,
+            fallback_reason=self._fallback_reason(result),
+            degraded_reasons=(
+                (result.degradation_reason,)
+                if result.degradation_reason is not None
+                else ()
+            ),
+            warnings=result.failures,
+            process_evidence=result,
+        )
+
+
+    @staticmethod
+    def _fallback_reason(result: CouncilResult) -> str | None:
+        if result.fallback_source is None:
+            return None
+        if result.degradation_reason == "chairman_failed":
+            return "chairman_failed_candidate_fallback"
+        if result.degradation_reason == "aggregator_failed":
+            return "aggregator_failed_advisor_fallback"
+        return "process_fallback"
 
     def _run_single(
         self,
@@ -135,7 +199,20 @@ class CouncilRunner:
             task,
             _MAX_INVOKER_PROMPT_CHARS - len(suffix),
         ) + suffix
-        final = self.invoke(actor.model, prompt, "actor", actor.reasoning_effort)
+        try:
+            final = str(
+                self.invoke(actor.model, prompt, "actor", actor.reasoning_effort) or ""
+            ).strip()
+            if not final:
+                raise RuntimeError("empty response")
+        except (RuntimeError, TimeoutError) as exc:
+            code = _failure_code(exc)
+            raise _DecisionExecutionFailure(
+                "single_invocation_failed",
+                observed_calls=1,
+                warnings=(f"actor failed: {code}",),
+                actual_process=DecisionProcess.SINGLE,
+            ) from exc
         task_truncated = len(str(task)) > _MAX_INVOKER_PROMPT_CHARS - len(suffix)
         degradation_reason = forced_reason or plan.degradation_reason
         if degradation_reason is None and task_truncated:
@@ -153,6 +230,7 @@ class CouncilRunner:
             0.0,
             None,
             task_truncated,
+            DecisionProcess.SINGLE,
         )
 
     def _parallel(
@@ -180,7 +258,7 @@ class CouncilRunner:
                     if not text:
                         raise RuntimeError("empty response")
                     completed[index] = (participant, text)
-                except Exception as exc:  # noqa: BLE001 - model invocation boundary
+                except (RuntimeError, TimeoutError) as exc:
                     failures.append(
                         f"{role_prefix}-{index + 1} failed: {_failure_code(exc)}"
                     )
@@ -272,7 +350,12 @@ class CouncilRunner:
         prompts = [self._advisor_prompt(task, participant.role) for participant in advisors]
         answers, failures, calls = self._parallel(advisors, prompts, "advisor")
         if not answers:
-            raise RuntimeError("All MoA advisors failed")
+            raise _DecisionExecutionFailure(
+                "all_moa_advisors_failed",
+                observed_calls=calls,
+                warnings=tuple(failures),
+                actual_process=DecisionProcess.CUSTOM_MOA,
+            )
         known_models = [participant.model for participant in plan.participants]
         answers = [
             (participant, self._scrub_identities(text, known_models))
@@ -294,10 +377,15 @@ class CouncilRunner:
         aggregator_failed = False
         fallback_source: str | None = None
         try:
-            final = self.invoke(
-                aggregator.model, prompt, "aggregator", aggregator.reasoning_effort
-            )
-        except Exception as exc:  # noqa: BLE001 - model invocation boundary
+            final = str(
+                self.invoke(
+                    aggregator.model, prompt, "aggregator", aggregator.reasoning_effort
+                )
+                or ""
+            ).strip()
+            if not final:
+                raise RuntimeError("empty response")
+        except (RuntimeError, TimeoutError) as exc:
             aggregator_failed = True
             failures.append(
                 f"aggregator failed: {_failure_code(exc)}"
@@ -338,6 +426,7 @@ class CouncilRunner:
             0.0,
             fallback_source,
             task_truncated,
+            DecisionProcess.CUSTOM_MOA,
         )
 
     def _run_council(
@@ -356,7 +445,12 @@ class CouncilRunner:
             advisors, advisor_prompts, "advisor"
         )
         if not raw_answers:
-            raise RuntimeError("All council advisors failed")
+            raise _DecisionExecutionFailure(
+                "all_council_advisors_failed",
+                observed_calls=advisor_calls,
+                warnings=tuple(failures),
+                actual_process=DecisionProcess.CUSTOM_COUNCIL,
+            )
 
         rng = random.Random(seed)
         shuffled = list(raw_answers)
@@ -432,14 +526,19 @@ class CouncilRunner:
         fallback_source: str | None = None
         chairman_failed = False
         try:
-            final = self.invoke(
-                chairman.model,
-                chairman_prompt,
-                "chairman",
-                chairman.reasoning_effort,
-            )
+            final = str(
+                self.invoke(
+                    chairman.model,
+                    chairman_prompt,
+                    "chairman",
+                    chairman.reasoning_effort,
+                )
+                or ""
+            ).strip()
+            if not final:
+                raise RuntimeError("empty response")
             final = self._scrub_identities(final, known_models)
-        except Exception as exc:  # noqa: BLE001 - model invocation boundary
+        except (RuntimeError, TimeoutError) as exc:
             chairman_failed = True
             failures.append(
                 f"chairman failed: {_failure_code(exc)}"
@@ -483,4 +582,5 @@ class CouncilRunner:
             review_coverage,
             fallback_source,
             task_truncated,
+            DecisionProcess.CUSTOM_COUNCIL,
         )
