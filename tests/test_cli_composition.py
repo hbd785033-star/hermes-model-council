@@ -2,6 +2,7 @@ import io
 import json
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from model_council.analysis import TaskProfile
@@ -273,6 +274,98 @@ class CliCompositionTests(unittest.TestCase):
         self.assertEqual(payload["call_count"], 7)
         self.assertEqual(payload["execution_call_count"], 7)
         self.assertEqual(payload["total_call_count"], 9)
+
+    def test_install_presets_requires_yes_before_any_config_dependency(self):
+        with (
+            patch("model_council.cli.prepare_recommendation") as prepare,
+            patch("model_council.cli._install_presets") as install,
+        ):
+            with self.assertRaises(SystemExit):
+                main(["install-presets", "--no-probe", "--json"])
+
+        prepare.assert_not_called()
+        install.assert_not_called()
+
+    def test_install_presets_json_preserves_output_and_wires_config_helper(self):
+        fast_plan = self._fast_plan()
+        quality_plan = self._quality_plan()
+        recommendation = self._recommendation_result(fast_plan, quality_plan)
+        backup = Path("backup.yaml")
+        normalized = {
+            "default_preset": "quality",
+            "presets": {"balanced": {}, "quality": {}},
+        }
+
+        with (
+            patch(
+                "model_council.cli.prepare_recommendation",
+                return_value=recommendation,
+            ) as prepare,
+            patch(
+                "model_council.cli._install_presets",
+                return_value=(backup, normalized),
+            ) as install,
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = main(
+                    [
+                        "install-presets",
+                        "--task",
+                        "example task",
+                        "--no-probe",
+                        "--refresh-probe",
+                        "--timeout",
+                        "123",
+                        "--yes",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(result, 0)
+        prepare.assert_called_once_with(
+            "example task",
+            live_probe=False,
+            timeout=123,
+            refresh_probe=True,
+        )
+        install.assert_called_once()
+        self.assertIs(install.call_args.args[0], recommendation[2])
+        self.assertEqual(payload, {
+            "backup": "backup.yaml",
+            "default_preset": "quality",
+            "presets": ["balanced", "quality"],
+            "health_diagnostics": {},
+            "probe_call_count": 2,
+            "probe_cache_hit_count": 1,
+        })
+
+    def test_install_presets_text_output_remains_compatible(self):
+        plans = [self._fast_plan()]
+        recommendation = self._recommendation_result(*plans)
+        backup = Path("backup.yaml")
+        normalized = {
+            "default_preset": "quality",
+            "presets": {"balanced": {}, "quality": {}},
+        }
+
+        with (
+            patch("model_council.cli.prepare_recommendation", return_value=recommendation),
+            patch(
+                "model_council.cli._install_presets",
+                return_value=(backup, normalized),
+            ),
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = main(["install-presets", "--no-probe", "--yes"])
+
+        text = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("Installed native Hermes MoA presets. Backup: backup.yaml", text)
+        self.assertIn("Default preset: quality", text)
+        self.assertIn("Presets: balanced, quality", text)
 
 
 if __name__ == "__main__":
