@@ -47,8 +47,10 @@ _ROLE_LENSES = {
 
 def select_decision_lenses(advisor_count: int) -> tuple[DecisionLens, ...]:
     """Return the exact V1 lens prefix for an advisor count from zero to three."""
+    if type(advisor_count) is not int:
+        raise ValueError("advisor_count must be an integer between 0 and 3")
     if advisor_count < 0 or advisor_count > len(DECISION_LENSES):
-        raise ValueError("advisor_count must be between 0 and 3")
+        raise ValueError("advisor_count must be an integer between 0 and 3")
     return DECISION_LENSES[:advisor_count]
 
 

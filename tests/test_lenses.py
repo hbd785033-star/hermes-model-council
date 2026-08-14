@@ -36,6 +36,12 @@ class DecisionLensTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "between 0 and 3"):
                     select_decision_lenses(advisor_count)
 
+    def test_invalid_advisor_count_types_fail_closed(self):
+        for value in (1.5, "2", None, True, False):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "integer between 0 and 3"):
+                    select_decision_lenses(value)
+
     def test_v1_lenses_are_unique_non_empty_and_distinct(self):
         self.assertEqual(LENS_POLICY_VERSION, "hmc-lenses-v1.0")
         self.assertEqual(
