@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from .analysis import TaskProfile
 from .inventory import ModelSpec
+from .lenses import select_decision_lenses
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,13 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
             seen_families.add(ref.family)
     if not balanced_advisors:
         balanced_advisors = [Participant("advisor", primary, _effort(profile))]
+    balanced_advisors = [
+        Participant(f"advisor-{lens.id}", participant.model, participant.reasoning_effort)
+        for participant, lens in zip(
+            balanced_advisors,
+            select_decision_lenses(len(balanced_advisors)),
+        )
+    ]
     balanced_participants = (
         *balanced_advisors,
         Participant("aggregator", primary, _effort(profile, premium=True)),
@@ -274,8 +282,8 @@ def recommend_plans(profile: TaskProfile, models: list[ModelSpec]) -> list[Plan]
     ][:2]) if len(advisors) >= 2 else 0
     calls = len(advisors) + reviewer_count + 1
     quality_participants = [
-        Participant(f"advisor-{index}", model, _effort(profile, premium=True))
-        for index, model in enumerate(advisors, start=1)
+        Participant(f"advisor-{lens.id}", model, _effort(profile, premium=True))
+        for model, lens in zip(advisors, select_decision_lenses(len(advisors)))
     ]
     quality_participants.append(
         Participant("chairman", chairman_model, _effort(profile, premium=True))

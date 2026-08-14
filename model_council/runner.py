@@ -14,6 +14,7 @@ from .decision import (
     DecisionStatus,
 )
 from .inventory import ModelSpec
+from .lenses import resolve_advisor_lens
 from .recommender import (
     Participant,
     Plan,
@@ -297,9 +298,13 @@ class CouncilRunner:
 
     @classmethod
     def _advisor_prompt(cls, task: str, role: str) -> str:
+        lens = resolve_advisor_lens(role)
         return (
             "You are an independent member of a model council. "
-            f"Your assigned lens is {role}. Analyze independently and do not imitate consensus.\n\n"
+            f"Decision lens: {lens.id}\n"
+            f"{lens.instruction}\n"
+            "Apply this lens silently. Do not mention the lens name or identifier in your answer. "
+            "Analyze independently and do not imitate consensus.\n\n"
             f"TASK:\n{cls._clip(task, _MAX_STAGE_TASK_CHARS)}\n\n"
             "Return at most 800 words: position, strongest evidence, failure modes, and one "
             "actionable recommendation. Do not mention your model or provider identity."

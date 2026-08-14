@@ -6,6 +6,17 @@ from model_council.recommender import recommend_plans
 
 
 class RecommendPlansTests(unittest.TestCase):
+    @staticmethod
+    def _lens_fixture_models():
+        return [
+            ModelSpec("openai-codex", "gpt-5.6-sol", "openai", True, True, True, True),
+            ModelSpec("openai-codex", "gpt-5.6-luna", "openai", False, True, True, True),
+            ModelSpec("anthropic", "claude-fable-5", "anthropic", False, True, False, True),
+            ModelSpec("anthropic", "claude-opus-4-6", "anthropic", False, True, True, True),
+            ModelSpec("google", "gemini-3-pro", "google", False, True, True, True),
+            ModelSpec("deepseek", "deepseek-v4-pro", "deepseek", False, True, False, False),
+        ]
+
     def test_returns_fast_balanced_and_quality_pareto_choices(self):
         models = [
             ModelSpec("openai-codex", "gpt-5.6-sol", "openai", True, True, True, True),
@@ -155,6 +166,64 @@ class RecommendPlansTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "healthy or unverified"):
             recommend_plans(profile, models)
+
+    def test_balanced_assigns_explicit_lenses_without_changing_models_or_budget(self):
+        balanced = recommend_plans(
+            TaskProfile("decision", 5, 5, False, False, True),
+            self._lens_fixture_models(),
+        )[1]
+        advisors = [
+            participant
+            for participant in balanced.participants
+            if participant.role.startswith("advisor")
+        ]
+
+        self.assertEqual(
+            [participant.role for participant in advisors],
+            ["advisor-solution", "advisor-risk"],
+        )
+        self.assertEqual(
+            [participant.model.key for participant in advisors],
+            ["openai-codex:gpt-5.6-sol", "google:gemini-3-pro"],
+        )
+        self.assertEqual(balanced.chairman.role, "aggregator")
+        self.assertEqual((balanced.estimated_calls, balanced.max_calls), (3, 4))
+
+    def test_quality_assigns_three_lenses_without_changing_models_or_call_formula(self):
+        quality = recommend_plans(
+            TaskProfile("decision", 5, 5, False, False, True),
+            self._lens_fixture_models(),
+        )[2]
+        advisors = [
+            participant
+            for participant in quality.participants
+            if participant.role.startswith("advisor")
+        ]
+
+        self.assertEqual(
+            [participant.role for participant in advisors],
+            ["advisor-solution", "advisor-risk", "advisor-feasibility"],
+        )
+        self.assertEqual(
+            [participant.model.key for participant in advisors],
+            [
+                "anthropic:claude-fable-5",
+                "openai-codex:gpt-5.6-sol",
+                "google:gemini-3-pro",
+            ],
+        )
+        self.assertEqual(quality.chairman.role, "chairman")
+        self.assertEqual(quality.estimated_calls, 6)
+
+    def test_single_and_degraded_plans_keep_actor_role(self):
+        only = ModelSpec("openai-codex", "gpt-5.6-sol", "openai", healthy=True)
+
+        plans = recommend_plans(
+            TaskProfile("decision", 5, 5, False, False, True),
+            [only],
+        )
+
+        self.assertEqual([plan.participants[0].role for plan in plans], ["actor"] * 3)
 
 
 if __name__ == "__main__":

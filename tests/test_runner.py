@@ -6,6 +6,142 @@ from model_council.runner import CouncilRunner, _failure_code
 
 
 class CouncilRunnerTests(unittest.TestCase):
+    def test_advisor_prompts_apply_distinct_lenses_with_shared_contract(self):
+        task = "Choose a database architecture"
+        prompts = {
+            lens: CouncilRunner._advisor_prompt(task, f"advisor-{lens}")
+            for lens in ("solution", "risk", "feasibility")
+        }
+
+        self.assertEqual(len(set(prompts.values())), 3)
+        for lens, prompt in prompts.items():
+            with self.subTest(lens=lens):
+                self.assertIn(f"Decision lens: {lens}", prompt)
+                self.assertIn(f"TASK:\n{task}", prompt)
+                self.assertIn("Return at most 800 words", prompt)
+                self.assertIn("Do not mention your model or provider identity", prompt)
+                self.assertIn("Do not mention the lens name or identifier", prompt)
+        self.assertIn("strongest direct solution", prompts["solution"])
+        for term in ("counterexamples", "hidden assumptions", "failure modes"):
+            self.assertIn(term, prompts["risk"])
+        for term in ("constraints", "operational complexity", "cost", "maintainability"):
+            self.assertIn(term, prompts["feasibility"])
+
+    def test_legacy_advisor_roles_receive_v1_lens_prompts_in_real_council(self):
+        models = [
+            ModelSpec("provider-a", "model-a", "family-a"),
+            ModelSpec("provider-b", "model-b", "family-b"),
+            ModelSpec("provider-c", "model-c", "family-c"),
+            ModelSpec("provider-d", "model-d", "family-d"),
+        ]
+        plan = Plan(
+            "quality",
+            "Quality",
+            "council",
+            (
+                Participant("advisor-1", models[0], "high"),
+                Participant("advisor-2", models[1], "high"),
+                Participant("advisor-3", models[2], "high"),
+                Participant("chairman", models[3], "high"),
+            ),
+            6,
+            9,
+            (),
+            (),
+        )
+        advisor_prompts = []
+
+        def invoke(_model, prompt, role, _effort):
+            if role.startswith("advisor"):
+                advisor_prompts.append(prompt)
+                return "candidate"
+            if role.startswith("reviewer"):
+                return "review"
+            return "final"
+
+        CouncilRunner(invoke=invoke, max_workers=1).run("task", plan, seed=1)
+
+        self.assertEqual(len(advisor_prompts), 3)
+        self.assertIn("Decision lens: solution", advisor_prompts[0])
+        self.assertIn("Decision lens: risk", advisor_prompts[1])
+        self.assertIn("Decision lens: feasibility", advisor_prompts[2])
+
+    def test_new_lens_roles_keep_ordinal_invoker_stage_roles(self):
+        models = [
+            ModelSpec("provider-a", "model-a", "family-a"),
+            ModelSpec("provider-b", "model-b", "family-b"),
+            ModelSpec("provider-c", "model-c", "family-c"),
+            ModelSpec("provider-d", "model-d", "family-d"),
+        ]
+        plan = Plan(
+            "quality",
+            "Quality",
+            "council",
+            (
+                Participant("advisor-solution", models[0], "high"),
+                Participant("advisor-risk", models[1], "high"),
+                Participant("advisor-feasibility", models[2], "high"),
+                Participant("chairman", models[3], "high"),
+            ),
+            6,
+            9,
+            (),
+            (),
+        )
+        advisor_roles = []
+
+        def invoke(_model, _prompt, role, _effort):
+            if role.startswith("advisor"):
+                advisor_roles.append(role)
+                return "candidate"
+            if role.startswith("reviewer"):
+                return "review"
+            return "final"
+
+        CouncilRunner(invoke=invoke, max_workers=1).run("task", plan, seed=1)
+
+        self.assertEqual(advisor_roles, ["advisor-1", "advisor-2", "advisor-3"])
+
+    def test_lens_roles_do_not_leak_into_anonymous_peer_review_prompts(self):
+        models = [
+            ModelSpec("provider-a", "model-a", "family-a"),
+            ModelSpec("provider-b", "model-b", "family-b"),
+            ModelSpec("provider-c", "model-c", "family-c"),
+            ModelSpec("provider-d", "model-d", "family-d"),
+        ]
+        plan = Plan(
+            "quality",
+            "Quality",
+            "council",
+            (
+                Participant("advisor-solution", models[0], "high"),
+                Participant("advisor-risk", models[1], "high"),
+                Participant("advisor-feasibility", models[2], "high"),
+                Participant("chairman", models[3], "high"),
+            ),
+            6,
+            9,
+            (),
+            (),
+        )
+        review_prompts = []
+
+        def invoke(_model, prompt, role, _effort):
+            if role.startswith("advisor"):
+                return "candidate"
+            if role.startswith("reviewer"):
+                review_prompts.append(prompt)
+                return "review"
+            return "final"
+
+        CouncilRunner(invoke=invoke, max_workers=1).run("task", plan, seed=1)
+
+        self.assertTrue(review_prompts)
+        self.assertTrue(all("candidate-" in prompt for prompt in review_prompts))
+        for prompt in review_prompts:
+            for role in ("advisor-solution", "advisor-risk", "advisor-feasibility"):
+                self.assertNotIn(role, prompt)
+
     def test_candidate_ids_are_stable_across_reviewers_and_chairman(self):
         models = [
             ModelSpec("provider-a", "model-a", "family-a"),
