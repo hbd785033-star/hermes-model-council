@@ -29,7 +29,7 @@ class CliCompositionTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _quality_plan() -> Plan:
+    def _quality_plan(*, degraded: bool = False) -> Plan:
         models = [
             ModelSpec("provider-a", "model-a", "family-a"),
             ModelSpec("provider-b", "model-b", "family-b"),
@@ -49,6 +49,28 @@ class CliCompositionTests(unittest.TestCase):
             ),
             6,
             9,
+            (),
+            (),
+            degraded=degraded,
+            degradation_reason="fixture_degraded" if degraded else None,
+        )
+
+    @staticmethod
+    def _balanced_plan() -> Plan:
+        models = [
+            ModelSpec("provider-a", "model-a", "family-a"),
+            ModelSpec("provider-b", "model-b", "family-b"),
+        ]
+        return Plan(
+            "balanced",
+            "Balanced",
+            "moa",
+            (
+                Participant("advisor-1", models[0], "medium"),
+                Participant("aggregator", models[1], "high"),
+            ),
+            2,
+            3,
             (),
             (),
         )
@@ -366,6 +388,81 @@ class CliCompositionTests(unittest.TestCase):
         self.assertIn("Installed native Hermes MoA presets. Backup: backup.yaml", text)
         self.assertIn("Default preset: quality", text)
         self.assertIn("Presets: balanced, quality", text)
+
+    def test_recommend_json_includes_activation_without_changing_existing_contract(self):
+        fast = self._fast_plan()
+        balanced = self._balanced_plan()
+        quality = self._quality_plan(degraded=True)
+        profile = TaskProfile("decision", 3, 5, True, False, True)
+        recommendation = (profile, [], [fast, balanced, quality], {"probe": "ok"}, 2, 1)
+
+        with patch(
+            "model_council.cli.prepare_recommendation",
+            return_value=recommendation,
+        ) as prepare:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = main(["recommend", "example task", "--json"])
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(result, 0)
+        prepare.assert_called_once_with(
+            "example task",
+            live_probe=False,
+            timeout=180,
+            refresh_probe=False,
+        )
+        for key in (
+            "task_profile",
+            "available_models",
+            "plans",
+            "health_diagnostics",
+            "probe_call_count",
+            "probe_cache_hit_count",
+        ):
+            self.assertIn(key, payload)
+        self.assertEqual(
+            payload["activation"],
+            {
+                "desired_plan": "quality",
+                "recommended_plan": "balanced",
+                "execution_preference": "hermes_native_preferred",
+                "reasons": [
+                    "diversity_beneficial",
+                    "high_risk",
+                    "tools_need_native_execution",
+                    "desired_plan_degraded",
+                    "recommendation_fallback",
+                ],
+                "policy_version": "hmc-activation-v1.0",
+            },
+        )
+
+    def test_recommend_text_displays_activation_decision(self):
+        fast = self._fast_plan()
+        balanced = self._balanced_plan()
+        quality = self._quality_plan()
+        profile = TaskProfile("general", 3, 2, False, False, True)
+        recommendation = (profile, [], [fast, balanced, quality], {}, 0, 0)
+
+        with patch(
+            "model_council.cli.prepare_recommendation",
+            return_value=recommendation,
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = main(["recommend", "example task"])
+
+        text = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("Desired plan: balanced", text)
+        self.assertIn("Recommended plan: balanced", text)
+        self.assertIn("Execution preference: custom_tool_free_ok", text)
+        self.assertIn("Activation reasons: diversity_beneficial", text)
+        self.assertIn("Activation policy: hmc-activation-v1.0", text)
+        self.assertIn("[fast]", text)
+        self.assertIn("[balanced]", text)
+        self.assertIn("[quality]", text)
 
 
 if __name__ == "__main__":

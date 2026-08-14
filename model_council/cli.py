@@ -10,6 +10,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+from .activation import recommend_activation
 from .analysis import TaskProfile, analyze_task
 from .decision import CouncilResult, DecisionRecord
 from .health import HealthCache, ProbeResult, probe_models
@@ -214,6 +215,7 @@ def _recommendation_payload(
     probe_call_count: int = 0,
     probe_cache_hit_count: int = 0,
 ) -> dict[str, Any]:
+    activation = recommend_activation(profile, plans)
     return {
         "task_profile": asdict(profile),
         "available_models": [model_to_dict(model) for model in models if model.healthy is not False],
@@ -221,6 +223,13 @@ def _recommendation_payload(
         "health_diagnostics": diagnostics,
         "probe_call_count": probe_call_count,
         "probe_cache_hit_count": probe_cache_hit_count,
+        "activation": {
+            "desired_plan": activation.desired_plan,
+            "recommended_plan": activation.recommended_plan,
+            "execution_preference": activation.execution_preference,
+            "reasons": list(activation.reasons),
+            "policy_version": activation.policy_version,
+        },
     }
 
 
@@ -233,17 +242,18 @@ def _print_recommendation(
     probe_cache_hit_count: int,
     as_json: bool,
 ) -> None:
+    payload = _recommendation_payload(
+        profile,
+        models,
+        plans,
+        diagnostics,
+        probe_call_count,
+        probe_cache_hit_count,
+    )
     if as_json:
         print(
             json.dumps(
-                _recommendation_payload(
-                    profile,
-                    models,
-                    plans,
-                    diagnostics,
-                    probe_call_count,
-                    probe_cache_hit_count,
-                ),
+                payload,
                 ensure_ascii=False,
                 indent=2,
             )
@@ -253,6 +263,12 @@ def _print_recommendation(
         f"Task: type={profile.kind}, complexity={profile.complexity}/5, "
         f"risk={profile.risk}/5, tools={'yes' if profile.needs_tools else 'no'}"
     )
+    activation = payload["activation"]
+    print(f"Desired plan: {activation['desired_plan']}")
+    print(f"Recommended plan: {activation['recommended_plan']}")
+    print(f"Execution preference: {activation['execution_preference']}")
+    print("Activation reasons: " + ", ".join(activation["reasons"]))
+    print(f"Activation policy: {activation['policy_version']}")
     if diagnostics:
         print("\nHealth probes:")
         for key, status in diagnostics.items():
